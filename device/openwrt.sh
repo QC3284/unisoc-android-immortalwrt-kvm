@@ -30,6 +30,7 @@ LAN_GUEST_IP=192.168.88.1
 # 1000 is unused by the framework (it uses 97-99 and 100+ per-network tables).
 OWRT_TABLE=1000
 RULE_PRIO=100
+ROUTED_TETHER_RULE_PRIO=1053
 UPSTREAM_RULE_PRIO=1050
 IPV6_OUT_RULE_PRIO=1051
 IPV6_IN_RULE_PRIO=1052
@@ -41,6 +42,9 @@ IPV6_FORWARD_CHAIN=OWT6_VM
 HOST_ROUTE_PRIO=1049
 SSH_DNAT_PORT=2223
 WEB_DNAT_PORT=8080
+ROUTED_IFACES_FILE="$VM_DIR/routed-tethers"
+EFFECTIVE_TETHER_MODE=""
+UNSAFE_NATIVE_BRIDGE=0
 
 die() {
     echo "openwrt: $*" >&2
@@ -59,9 +63,39 @@ load_config() {
     : "${CELLULAR_IFACE:=auto}"
     : "${CELLULAR_ROUTE_TABLE:=auto}"
     : "${TETHER_IFACE_PATTERNS:=auto}"
+    : "${TETHER_MODE:=auto}"
     case "$IPV6_PASSTHROUGH" in
         0|1) ;;
         *) die "IPV6_PASSTHROUGH must be 0 or 1" ;;
+    esac
+    case "$TETHER_MODE" in
+        auto|bridge|routed) ;;
+        *) die "TETHER_MODE must be auto, bridge, or routed" ;;
+    esac
+}
+
+resolve_tether_mode() {
+    platform="$(getprop ro.board.platform 2>/dev/null | tr 'A-Z' 'a-z')"
+    soc="$(getprop ro.soc.model 2>/dev/null | tr 'A-Z' 'a-z')"
+    product="$(getprop ro.product.device 2>/dev/null | tr 'A-Z' 'a-z')"
+    model="$(getprop ro.product.model 2>/dev/null | tr 'A-Z' 'a-z')"
+    UNSAFE_NATIVE_BRIDGE=0
+    if { [ "$platform" = ums9620 ] || [ "$soc" = t760 ]; } && \
+            { [ "$product" = mu300 ] || [ "$model" = f50 ]; } && \
+            [ -d /sys/module/sprd_wlan_combo ]; then
+        UNSAFE_NATIVE_BRIDGE=1
+    fi
+    case "$TETHER_MODE" in
+        bridge|routed) EFFECTIVE_TETHER_MODE="$TETHER_MODE" ;;
+        auto)
+            # UMS9620's Android 13 sprd_wlan_combo driver corrupts an skb when
+            # its native hotspot bridge is extended with another Linux bridge.
+            if [ "$UNSAFE_NATIVE_BRIDGE" = 1 ]; then
+                EFFECTIVE_TETHER_MODE=routed
+            else
+                EFFECTIVE_TETHER_MODE=bridge
+            fi
+            ;;
     esac
 }
 
@@ -124,6 +158,7 @@ resolve_device_config() {
     [ -e "/sys/class/net/$CELLULAR_IFACE" ] || \
         die "cellular interface does not exist: $CELLULAR_IFACE"
     [ "$CELLULAR_ROUTE_TABLE" = auto ] && CELLULAR_ROUTE_TABLE="$CELLULAR_IFACE"
+    resolve_tether_mode
 }
 
 matches_tether_pattern() {
@@ -261,6 +296,52 @@ sync_bridge_ports() {
             bridge_detach "$iface"
         fi
     done
+}
+
+ensure_owrt_routes() {
+    ip route replace "$LAN_SUBNET" dev "$LAN_BRIDGE" table "$OWRT_TABLE"
+    ip route replace "$WAN_SUBNET" dev "$WAN_TAP" table "$OWRT_TABLE"
+    ip route replace default via "$LAN_GUEST_IP" dev "$LAN_BRIDGE" table "$OWRT_TABLE"
+}
+
+clear_routed_tethers() {
+    while ip -4 rule del priority "$ROUTED_TETHER_RULE_PRIO" 2>/dev/null; do :; done
+    delete_jump_and_chain nat PREROUTING OWT_RPRE
+    rm -f "$ROUTED_IFACES_FILE"
+}
+
+sync_routed_tethers() {
+    desired=""
+    for path in /sys/class/net/*; do
+        iface="${path##*/}"
+        is_tether_candidate "$iface" || continue
+        desired="${desired}${iface}
+"
+    done
+    clear_routed_tethers
+    ensure_owrt_routes
+    iptables -t nat -N OWT_RPRE 2>/dev/null || true
+    iptables -t nat -F OWT_RPRE
+    printf '%s' "$desired" | while read -r iface; do
+        [ -n "$iface" ] || continue
+        ip -4 rule add priority "$ROUTED_TETHER_RULE_PRIO" iif "$iface" lookup "$OWRT_TABLE"
+        # Android advertises itself as DNS. Send client DNS to OpenWrt so its
+        # dnsmasq/PassWall policy is still applied in routed fallback mode.
+        iptables -t nat -A OWT_RPRE -i "$iface" -p udp --dport 53 \
+            -j DNAT --to-destination "$LAN_GUEST_IP:53"
+        iptables -t nat -A OWT_RPRE -i "$iface" -p tcp --dport 53 \
+            -j DNAT --to-destination "$LAN_GUEST_IP:53"
+    done
+    ensure_jump nat PREROUTING OWT_RPRE
+    printf '%s' "$desired" > "$ROUTED_IFACES_FILE"
+}
+
+sync_tether_network() {
+    if [ "$EFFECTIVE_TETHER_MODE" = routed ]; then
+        sync_routed_tethers
+    else
+        sync_bridge_ports
+    fi
 }
 
 cellular_ipv6_prefix() {
@@ -455,7 +536,28 @@ sync_ipv6_managed() {
     ensure_ra6_port "$WAN_TAP" "$prefix" "$WAN_TAP"
 }
 
+sync_routed_ipv6_policy() {
+    delete_ip6_jump_and_chain FORWARD OWT6_ROUTED
+    [ "$IPV6_PASSTHROUGH" = 1 ] && return 0
+    ip6tables -N OWT6_ROUTED 2>/dev/null || true
+    ip6tables -F OWT6_ROUTED
+    for path in /sys/class/net/*; do
+        iface="${path##*/}"
+        is_tether_candidate "$iface" || continue
+        ip6tables -A OWT6_ROUTED -i "$iface" -j REJECT
+        ip6tables -A OWT6_ROUTED -o "$iface" -j REJECT
+    done
+    ensure_ip6_jump FORWARD OWT6_ROUTED
+}
+
 sync_ipv6_downstream() {
+    # The safe routed fallback cannot advertise OpenWrt's LAN prefix without
+    # extending br0. Honour the switch by passing Android IPv6 at 1 and
+    # blocking downstream IPv6 at 0 so it cannot silently bypass OpenWrt.
+    if [ "$EFFECTIVE_TETHER_MODE" = routed ]; then
+        sync_routed_ipv6_policy
+        return 0
+    fi
     if [ "$IPV6_PASSTHROUGH" = 1 ]; then
         sync_ipv6_passthrough
     else
@@ -472,6 +574,7 @@ refresh_ipv6() {
 }
 
 detach_bridge_ports() {
+    clear_routed_tethers
     for path in /sys/class/net/*; do
         iface="${path##*/}"
         bridge_detach "$iface"
@@ -507,6 +610,10 @@ sync_upstream() {
 }
 
 sync_dhcp_block() {
+    if [ "$EFFECTIVE_TETHER_MODE" = routed ]; then
+        delete_jump_and_chain filter OUTPUT OWT_OUT
+        return 0
+    fi
     iptables -N OWT_OUT 2>/dev/null || true
     iptables -F OWT_OUT
     iptables -A OWT_OUT -o "$LAN_BRIDGE" -p udp --sport 67 --dport 68 -j DROP
@@ -541,7 +648,7 @@ setup_network() {
     ip link set dev "$LAN_TAP" master "$LAN_BRIDGE"
     ip addr flush dev "$LAN_BRIDGE" 2>/dev/null
     ip addr add "$LAN_HOST_IP/24" dev "$LAN_BRIDGE"
-    sync_bridge_ports
+    sync_tether_network
     sync_ipv6_downstream
 
     # Let the Android host itself reach the OpenWrt subnets (default policy
@@ -597,8 +704,8 @@ setup_network() {
         -j DNAT --to-destination "$LAN_GUEST_IP:80"
     ensure_jump nat PREROUTING OWT_PRE
 
-    # Android's tethering service still owns the physical AP/RNDIS lifecycle,
-    # but OpenWrt is the only DHCP/RA server on bridged downstream ports.
+    # Android owns AP/RNDIS lifecycle. Bridge mode moves DHCP/RA to OpenWrt;
+    # routed fallback retains Android DHCP and steers IPv4/DNS through OpenWrt.
     sync_dhcp_block
 
 }
@@ -608,6 +715,7 @@ teardown_network() {
     stop_ipv6_downstream
     ip rule del priority "$UPSTREAM_RULE_PRIO" 2>/dev/null || true
     detach_bridge_ports
+    ip route flush table "$OWRT_TABLE" 2>/dev/null || true
     ip rule del priority "$HOST_ROUTE_PRIO" to "$WAN_SUBNET" lookup main 2>/dev/null || true
     ip rule del priority "$HOST_ROUTE_PRIO" to "$LAN_SUBNET" lookup main 2>/dev/null || true
     delete_jump_and_chain filter FORWARD OWT_FWD
@@ -615,6 +723,7 @@ teardown_network() {
     delete_jump_and_chain nat PREROUTING OWT_PRE
     delete_jump_and_chain filter OUTPUT OWT_OUT
     delete_ip6_jump_and_chain OUTPUT OWT6_OUT
+    delete_ip6_jump_and_chain FORWARD OWT6_ROUTED
     ip link set "$LAN_TAP" nomaster 2>/dev/null || true
     ip link set "$LAN_BRIDGE" down 2>/dev/null || true
     ip link delete "$LAN_BRIDGE" type bridge 2>/dev/null || true
@@ -634,9 +743,7 @@ takeover() {
     ip link show "$LAN_TAP" >/dev/null 2>&1 || die "run start first"
 
     ip route flush table "$OWRT_TABLE" 2>/dev/null || true
-    ip route add "$LAN_SUBNET" dev "$LAN_BRIDGE" table "$OWRT_TABLE"
-    ip route add "$WAN_SUBNET" dev "$WAN_TAP" table "$OWRT_TABLE"
-    ip route add default via 192.168.88.1 dev "$LAN_BRIDGE" table "$OWRT_TABLE"
+    ensure_owrt_routes
 
     while ip -4 rule del priority "$RULE_PRIO" 2>/dev/null; do :; done
     ip rule add priority "$RULE_PRIO" iif lo lookup "$OWRT_TABLE"
@@ -651,14 +758,18 @@ takeover() {
     touch "$TAKEOVER_FLAG"
     sync_upstream
     start_monitor
-    echo "OpenWrt takeover enabled (Android apps routed; USB/WiFi hotspot bridged to OpenWrt LAN)"
+    echo "OpenWrt takeover enabled (Android apps routed; tether mode $EFFECTIVE_TETHER_MODE)"
 }
 
 untakeover() {
     rm -f "$TAKEOVER_FLAG"
     while ip -4 rule del priority "$RULE_PRIO" 2>/dev/null; do :; done
     while ip -6 rule del priority "$IPV6_BLOCK_PRIO" 2>/dev/null; do :; done
-    ip route flush table "$OWRT_TABLE" 2>/dev/null || true
+    if [ "$EFFECTIVE_TETHER_MODE" = routed ]; then
+        ensure_owrt_routes
+    else
+        ip route flush table "$OWRT_TABLE" 2>/dev/null || true
+    fi
     delete_ip6_jump_and_chain FORWARD OWT6_FWD
     echo "OpenWrt takeover disabled"
 }
@@ -667,7 +778,7 @@ network_monitor() {
     load_config
     resolve_device_config
     while is_running; do
-        sync_bridge_ports
+        sync_tether_network
         sync_ipv6_downstream
         sync_dhcp_block
         # Guest WAN forwarding must follow Wi-Fi/cellular changes regardless
@@ -697,6 +808,9 @@ stop_monitor() {
 preflight_vm() {
     load_config
     resolve_device_config
+    if [ "$UNSAFE_NATIVE_BRIDGE" = 1 ] && [ "$EFFECTIVE_TETHER_MODE" = bridge ]; then
+        die "TETHER_MODE=bridge is unsafe on MU300/UMS9620 sprd_wlan_combo; use auto or routed"
+    fi
     [ "$(getprop ro.product.cpu.abi 2>/dev/null)" = arm64-v8a ] || \
         die "only arm64-v8a Android hosts are supported"
     [ -c /dev/kvm ] || die "/dev/kvm is unavailable"
@@ -727,7 +841,7 @@ preflight_vm() {
     done
     [ -n "$matched" ] || \
         die "TETHER_IFACE_PATTERNS matches no current interface"
-    echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} ipv6_passthrough=$IPV6_PASSTHROUGH"
+    echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} mode=$EFFECTIVE_TETHER_MODE ipv6_passthrough=$IPV6_PASSTHROUGH"
 }
 
 start_vm() {
@@ -824,7 +938,7 @@ status_vm() {
     resolve_device_config
     if is_running; then
         bridge_ports="$(ls "/sys/class/net/$LAN_BRIDGE/brif" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
-        echo "running PID=$(cat "$PIDFILE") wan=$WAN_GUEST_IP lan=$LAN_GUEST_IP bridge=$LAN_BRIDGE ports=${bridge_ports:-none} ipv6_passthrough=$IPV6_PASSTHROUGH ssh=localhost:$SSH_DNAT_PORT"
+        echo "running PID=$(cat "$PIDFILE") wan=$WAN_GUEST_IP lan=$LAN_GUEST_IP tether_mode=$EFFECTIVE_TETHER_MODE bridge=$LAN_BRIDGE ports=${bridge_ports:-none} ipv6_passthrough=$IPV6_PASSTHROUGH ssh=localhost:$SSH_DNAT_PORT"
     else
         echo "stopped"
         return 1

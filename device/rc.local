@@ -2,7 +2,7 @@
 # platform does not expose a device-tree model, so OpenWrt otherwise reports
 # an empty model (shown as "?" in LuCI).
 mkdir -p /tmp/sysinfo
-printf '%s\n' 'ZTE W210DS (Unisoc UMS9620S)' > /tmp/sysinfo/model
+printf '%s\n' '@DEVICE_MODEL@' > /tmp/sysinfo/model
 
 # Keep the LAN router link-local stable across crosvm restarts. Without a
 # fixed bridge MAC, clients retain obsolete RA default gateways after reboot.

@@ -1,8 +1,8 @@
-# OpenWrt VM for W210DS / Android 13 ARM64
+# OpenWrt VM for MU300/F50 / Android 13 ARM64
 
 在已 Root、具备 KVM/TUN 的 ARM64 Android 设备上，通过 `crosvm` 运行 OpenWrt。
-已在 W210DS（Android 15 系统 crosvm）和 MU300/F50（Android 13、项目自带
-crosvm）上验证虚拟化能力及启动。
+本分支专用于 MU300/F50（Android 13、项目自带 crosvm）的安全路由方案；
+W210DS 使用 `main` 分支。
 本项目完全独立于 Debian VM，不会读写 Debian 的镜像、缓存或设备目录。
 
 ## 当前功能
@@ -10,7 +10,7 @@ crosvm）上验证虚拟化能力及启动。
 - OpenWrt 25.12.5、Linux 6.12 ARM64
 - 6 vCPU、1 GiB 内存（均可配置）
 - 8 GiB 稀疏虚拟磁盘；初次只传输 128 MiB，设备端按需占用空间
-- LuCI 显示 `ZTE W210DS (Unisoc UMS9620S)`，不再显示未知型号
+- 安装时自动读取 Android 厂商、型号、设备名和 SoC，LuCI 不再显示未知型号
 - Android 本机、SIM/APN 和应用流量保持由 Android 管理，不经 OpenWrt
 - USB 共享和 Wi-Fi 热点作为二层端口动态加入 `owrt-br`
 - 热点客户端直接从 OpenWrt DHCP 获取 `192.168.88.x`，保留真实 MAC
@@ -38,6 +38,8 @@ OPENWRT_PASSWORD='新密码' VM_CPUS=6 VM_MEMORY_MIB=1024 DISK_SIZE=8G \
 推荐直接编辑项目根目录的 `config.env`。其中：
 
 ```bash
+DEVICE_MODEL=auto  # 安装时从目标 ADB 设备自动生成；也可手动填写显示名称
+
 AUTO_TAKEOVER=0  # Android/SIM/应用直连，只有热点和 USB 客户端走 OpenWrt
 AUTO_TAKEOVER=1  # Android 本机应用流量也由 OpenWrt 接管
 
@@ -48,6 +50,7 @@ CROSVM_PATH=auto             # auto / bundled / 设备上的绝对路径
 CELLULAR_IFACE=auto          # 例如 sipa_eth0；auto 会按地址和常见命名探测
 CELLULAR_ROUTE_TABLE=auto    # auto 默认使用最终探测到的蜂窝接口名
 TETHER_IFACE_PATTERNS=auto   # 或 "sipa_usb* wlan* softap* eth* br*"
+TETHER_MODE=routed           # MU300 固定三层接管，禁止把原生 br0 扩展到 owrt-br
 ```
 
 同平台设备建议先保留全部 `auto`。如果厂商改了接口命名，只改这里，不需要改
@@ -149,6 +152,13 @@ IPv4 始终由 OpenWrt DHCP/NAT 和防火墙管理。IPv6 由
 `IPV6_PASSTHROUGH` 决定。设为 `0` 时，设备管理器把蜂窝公网 `/64` 发布到
 OpenWrt WAN；OpenWrt 在 LAN 发布自己管理的 ULA，并通过 OpenWrt NAT66、
 防火墙和可选代理后从公网 WAN 地址出站。客户端 IPv6 此时会经过 OpenWrt。
+
+MU300/F50 的 UMS9620 Android 13 内核带有 `sprd_wlan_combo` 驱动缺陷：把原生
+热点桥 `br0` 再接入另一个 Linux bridge 会在 Wi-Fi 发包路径触发 skb 释放错误。
+`TETHER_MODE=auto` 会仅在该机型切换到 `routed`：Android 保留热点/USB 的
+DHCP，IPv4 和 DNS 经策略路由进入 OpenWrt；W210 仍保持原二层桥。在 MU300
+路由模式下，`IPV6_PASSTHROUGH=1` 保留 Android 原生 IPv6，设为 `0` 则阻止
+热点/USB IPv6 绕过 OpenWrt（该安全回退模式不从 OpenWrt 下发 IPv6）。
 设为 `1` 时，Android 将蜂窝公网前缀直接发布到桥接的热点/USB 端口；客户端
 获得公网地址，但 IPv6 绕过 OpenWrt 防火墙。修改后执行
 `./deploy-openwrt.sh apply-config` 会重启 VM 并切换模式。
