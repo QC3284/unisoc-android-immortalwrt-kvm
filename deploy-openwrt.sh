@@ -735,7 +735,11 @@ restore_vm() {
     trap restore_rollback EXIT
 
     say "Uploading and verifying backup"
-    adb_cmd shell "su 0 sh -c 'rm -rf -- $RESTORE_STAGE && mkdir -p $RESTORE_STAGE && chmod 700 $RESTORE_STAGE'"
+    # adb push runs as Android's shell user, so the staging directory must be
+    # created by that user.  Root still owns the uploaded files before they are
+    # consumed and performs the final image replacement.
+    adb_cmd shell "su 0 sh -c 'rm -rf -- $RESTORE_STAGE'"
+    adb_cmd shell "mkdir -p '$RESTORE_STAGE' && chmod 700 '$RESTORE_STAGE'"
     adb_cmd push "$(adb_path "$backup")" "$remote_backup"
     adb_cmd push "$(adb_path "$BUILD_DIR/tools/sparse-writer")" "$remote_helper"
     adb_cmd shell "su 0 sh -c 'chown root:root $remote_backup $remote_helper && chmod 600 $remote_backup && chmod 700 $remote_helper'"
