@@ -42,6 +42,7 @@ DEVICE_MODEL=auto  # 安装时从目标 ADB 设备自动生成；也可手动填
 
 VM_CPUS=4              # 默认使用四个 vCPU
 VM_CPU_AFFINITY=auto   # 自动一一绑定到当前 Android 最快的四个在线核心
+VM_NET_QUEUES=auto     # 支持时启用与 vCPU 数量相同的 virtio-net 多队列
 # VM_CPU_AFFINITY=none             # 不绑核，交给 Android 调度
 # VM_CPU_AFFINITY='0=4:1=5:2=6:3=0' # 也可以显式指定 guest=host 映射
 

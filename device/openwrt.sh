@@ -53,6 +53,7 @@ EFFECTIVE_TETHER_MODE=""
 EFFECTIVE_CPU_AFFINITY=""
 EFFECTIVE_CPU_CAPACITY=""
 EFFECTIVE_CPU_CLUSTERS=""
+EFFECTIVE_NET_QUEUES=1
 UNSAFE_NATIVE_BRIDGE=0
 
 die() {
@@ -66,6 +67,7 @@ load_config() {
     : "${ROOT_DEVICE:=/dev/vda}"
     : "${VM_CPUS:=4}"
     : "${VM_CPU_AFFINITY:=auto}"
+    : "${VM_NET_QUEUES:=auto}"
     : "${VM_MEMORY_MIB:=1024}"
     : "${AUTO_TAKEOVER:=0}"
     : "${IPV6_PASSTHROUGH:=1}"
@@ -202,6 +204,29 @@ resolve_cpu_affinity() {
     esac
 }
 
+resolve_net_queues() {
+    case "$VM_NET_QUEUES" in
+        auto)
+            if echo "$crosvm_help" | grep -q -- '--net-vq-pairs'; then
+                EFFECTIVE_NET_QUEUES="$VM_CPUS"
+            else
+                EFFECTIVE_NET_QUEUES=1
+            fi
+            ;;
+        *[!0-9]*|'') die "VM_NET_QUEUES must be auto or a positive integer" ;;
+        0) die "VM_NET_QUEUES must be positive" ;;
+        *)
+            [ "$VM_NET_QUEUES" -le "$VM_CPUS" ] || \
+                die "VM_NET_QUEUES cannot exceed VM_CPUS"
+            EFFECTIVE_NET_QUEUES="$VM_NET_QUEUES"
+            if [ "$EFFECTIVE_NET_QUEUES" -gt 1 ] && \
+                    ! echo "$crosvm_help" | grep -q -- '--net-vq-pairs'; then
+                die "selected crosvm does not support --net-vq-pairs"
+            fi
+            ;;
+    esac
+}
+
 resolve_device_config() {
     case "$CROSVM_PATH" in
         auto)
@@ -230,6 +255,7 @@ resolve_device_config() {
         die "unsupported crosvm command line: neither --block nor --rwdisk is available"
     fi
     resolve_cpu_affinity
+    resolve_net_queues
     if [ -n "$EFFECTIVE_CPU_AFFINITY" ] && \
             ! echo "$crosvm_help" | grep -q -- '--cpu-affinity'; then
         die "selected crosvm does not support --cpu-affinity"
@@ -921,7 +947,21 @@ setup_network() {
     # Install the DHCP guard before TAP/bridge changes close the lifecycle race.
     sync_dhcp_block
     for tap in "$WAN_TAP" "$LAN_TAP"; do
-        ip tuntap add dev "$tap" mode tap 2>/dev/null || true
+        ip link set dev "$tap" nomaster 2>/dev/null || true
+        ip tuntap del dev "$tap" mode tap 2>/dev/null || ip link delete "$tap" 2>/dev/null || true
+        if [ "$EFFECTIVE_NET_QUEUES" -gt 1 ]; then
+            if ! ip tuntap add dev "$tap" mode tap multi_queue 2>/dev/null; then
+                if [ "$VM_NET_QUEUES" = auto ]; then
+                    echo "openwrt: multiqueue TAP unavailable; falling back to one queue" >&2
+                    EFFECTIVE_NET_QUEUES=1
+                    ip tuntap add dev "$tap" mode tap
+                else
+                    die "cannot create multiqueue TAP $tap"
+                fi
+            fi
+        else
+            ip tuntap add dev "$tap" mode tap
+        fi
     done
     ip addr flush dev "$WAN_TAP" 2>/dev/null
     ip addr add "$WAN_HOST_IP/24" dev "$WAN_TAP"
@@ -1160,7 +1200,19 @@ preflight_vm() {
     probe_bridge=owrt-checkbr
     ip link delete "$probe_tap" 2>/dev/null || true
     ip link delete "$probe_bridge" type bridge 2>/dev/null || true
-    ip tuntap add dev "$probe_tap" mode tap || die "kernel cannot create TAP interfaces"
+    if [ "$EFFECTIVE_NET_QUEUES" -gt 1 ]; then
+        if ! ip tuntap add dev "$probe_tap" mode tap multi_queue 2>/dev/null; then
+            if [ "$VM_NET_QUEUES" = auto ]; then
+                EFFECTIVE_NET_QUEUES=1
+                ip tuntap add dev "$probe_tap" mode tap || \
+                    die "kernel cannot create TAP interfaces"
+            else
+                die "kernel cannot create multiqueue TAP interfaces"
+            fi
+        fi
+    else
+        ip tuntap add dev "$probe_tap" mode tap || die "kernel cannot create TAP interfaces"
+    fi
     ip link add name "$probe_bridge" type bridge || {
         ip link delete "$probe_tap" 2>/dev/null || true
         die "kernel cannot create Linux bridges"
@@ -1175,7 +1227,7 @@ preflight_vm() {
     done
     [ -n "$matched" ] || \
         die "TETHER_IFACE_PATTERNS matches no current interface"
-    echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cpus=$VM_CPUS affinity=${EFFECTIVE_CPU_AFFINITY:-none} capacity=${EFFECTIVE_CPU_CAPACITY:-none} clusters=${EFFECTIVE_CPU_CLUSTERS:-none} cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} mode=$EFFECTIVE_TETHER_MODE ipv6_passthrough=$IPV6_PASSTHROUGH"
+    echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cpus=$VM_CPUS affinity=${EFFECTIVE_CPU_AFFINITY:-none} capacity=${EFFECTIVE_CPU_CAPACITY:-none} clusters=${EFFECTIVE_CPU_CLUSTERS:-none} net_queues=$EFFECTIVE_NET_QUEUES cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} mode=$EFFECTIVE_TETHER_MODE ipv6_passthrough=$IPV6_PASSTHROUGH"
 }
 
 start_vm() {
@@ -1203,6 +1255,9 @@ start_vm() {
     for cpu_cluster in $EFFECTIVE_CPU_CLUSTERS; do
         cpu_cluster_args="$cpu_cluster_args --cpu-cluster=$cpu_cluster"
     done
+    net_queue_arg=""
+    [ "$EFFECTIVE_NET_QUEUES" -gt 1 ] && \
+        net_queue_arg="--net-vq-pairs=$EFFECTIVE_NET_QUEUES"
 
     if [ "$CROSVM_STYLE" = block ]; then
         nohup "$CROSVM" run \
@@ -1211,6 +1266,7 @@ start_vm() {
             $cpu_affinity_arg \
             $cpu_capacity_arg \
             $cpu_cluster_args \
+            $net_queue_arg \
             --mem "$VM_MEMORY_MIB" \
             --socket "$SOCKET" \
             --serial "type=file,path=$CONSOLE,hardware=serial,num=1,console" \
@@ -1226,6 +1282,7 @@ start_vm() {
             $cpu_affinity_arg \
             $cpu_capacity_arg \
             $cpu_cluster_args \
+            $net_queue_arg \
             --mem "$VM_MEMORY_MIB" \
             --socket "$SOCKET" \
             --serial "type=file,path=$CONSOLE,hardware=serial,num=1,console" \
@@ -1290,7 +1347,7 @@ status_vm() {
     use_active_tether_mode
     if is_running; then
         bridge_ports="$(ls "/sys/class/net/$LAN_BRIDGE/brif" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
-        echo "running PID=$(cat "$PIDFILE") wan=$WAN_GUEST_IP lan=$LAN_GUEST_IP tether_mode=$EFFECTIVE_TETHER_MODE bridge=$LAN_BRIDGE ports=${bridge_ports:-none} ipv6_passthrough=$IPV6_PASSTHROUGH ssh=localhost:$SSH_DNAT_PORT"
+        echo "running PID=$(cat "$PIDFILE") wan=$WAN_GUEST_IP lan=$LAN_GUEST_IP tether_mode=$EFFECTIVE_TETHER_MODE bridge=$LAN_BRIDGE ports=${bridge_ports:-none} net_queues=$EFFECTIVE_NET_QUEUES ipv6_passthrough=$IPV6_PASSTHROUGH ssh=localhost:$SSH_DNAT_PORT"
     else
         echo "stopped"
         return 1
