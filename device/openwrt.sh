@@ -10,6 +10,7 @@ KERNEL="$VM_DIR/Image"
 CONFIG="$VM_DIR/vm.conf"
 PIDFILE="$VM_DIR/crosvm.pid"
 MONITOR_PIDFILE="$VM_DIR/network-monitor.pid"
+ACTIVE_MODE_FILE="$VM_DIR/active-tether-mode"
 RA6="$VM_DIR/ra6"
 KVM_PROBE="$VM_DIR/kvm-probe"
 DHCP_RELAY="$VM_DIR/dhcp-relay"
@@ -20,7 +21,9 @@ LOG="$VM_DIR/crosvm.log"
 CONSOLE="$VM_DIR/console.log"
 WAN_TAP=owrt-wan
 LAN_TAP=owrt-lan
-LAN_BRIDGE=owrt-br
+DEFAULT_LAN_BRIDGE=owrt-br
+NATIVE_TETHER_BRIDGE=br0
+LAN_BRIDGE="$DEFAULT_LAN_BRIDGE"
 WAN_HOST_IP=192.168.66.1
 WAN_SUBNET=192.168.66.0/24
 WAN_GUEST_IP=192.168.66.2
@@ -45,6 +48,7 @@ SSH_DNAT_PORT=2223
 WEB_DNAT_PORT=8080
 ROUTED_IFACES_FILE="$VM_DIR/routed-tethers"
 PROXYARP_IFACES_FILE="$VM_DIR/proxyarp-tethers"
+DIRECT_BR0_ADDR_FILE="$VM_DIR/direct-br0.addr"
 EFFECTIVE_TETHER_MODE=""
 UNSAFE_NATIVE_BRIDGE=0
 
@@ -71,12 +75,13 @@ load_config() {
         *) die "IPV6_PASSTHROUGH must be 0 or 1" ;;
     esac
     case "$TETHER_MODE" in
-        auto|bridge|routed|proxyarp) ;;
-        *) die "TETHER_MODE must be auto, bridge, routed, or proxyarp" ;;
+        auto|bridge|routed|proxyarp|directbr0) ;;
+        *) die "TETHER_MODE must be auto, bridge, routed, proxyarp, or directbr0" ;;
     esac
 }
 
 resolve_tether_mode() {
+    LAN_BRIDGE="$DEFAULT_LAN_BRIDGE"
     platform="$(getprop ro.board.platform 2>/dev/null | tr 'A-Z' 'a-z')"
     soc="$(getprop ro.soc.model 2>/dev/null | tr 'A-Z' 'a-z')"
     product="$(getprop ro.product.device 2>/dev/null | tr 'A-Z' 'a-z')"
@@ -88,7 +93,7 @@ resolve_tether_mode() {
         UNSAFE_NATIVE_BRIDGE=1
     fi
     case "$TETHER_MODE" in
-        bridge|routed|proxyarp) EFFECTIVE_TETHER_MODE="$TETHER_MODE" ;;
+        bridge|routed|proxyarp|directbr0) EFFECTIVE_TETHER_MODE="$TETHER_MODE" ;;
         auto)
             # UMS9620's Android 13 sprd_wlan_combo driver corrupts an skb when
             # its native hotspot bridge is extended with another Linux bridge.
@@ -99,6 +104,18 @@ resolve_tether_mode() {
             fi
             ;;
     esac
+    [ "$EFFECTIVE_TETHER_MODE" = directbr0 ] && LAN_BRIDGE="$NATIVE_TETHER_BRIDGE"
+}
+
+use_active_tether_mode() {
+    [ -r "$ACTIVE_MODE_FILE" ] || return 0
+    active_mode="$(cat "$ACTIVE_MODE_FILE" 2>/dev/null)"
+    case "$active_mode" in
+        bridge|routed|proxyarp|directbr0) EFFECTIVE_TETHER_MODE="$active_mode" ;;
+        *) return 0 ;;
+    esac
+    LAN_BRIDGE="$DEFAULT_LAN_BRIDGE"
+    [ "$EFFECTIVE_TETHER_MODE" = directbr0 ] && LAN_BRIDGE="$NATIVE_TETHER_BRIDGE"
 }
 
 detect_cellular_iface() {
@@ -445,10 +462,54 @@ sync_routed_tethers() {
     printf '%s' "$desired" > "$ROUTED_IFACES_FILE"
 }
 
+save_direct_br0_state() {
+    [ -d "/sys/class/net/$NATIVE_TETHER_BRIDGE/bridge" ] || \
+        die "native tether bridge does not exist: $NATIVE_TETHER_BRIDGE"
+    if [ ! -r "$DIRECT_BR0_ADDR_FILE" ]; then
+        ip -4 -o addr show dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null | \
+            awk '{print $4}' > "$DIRECT_BR0_ADDR_FILE"
+    fi
+}
+
+sync_direct_br0() {
+    save_direct_br0_state
+    clear_routed_tethers
+    clear_proxyarp_tethers
+    [ -e "/sys/class/net/$LAN_TAP" ] || return 0
+    current_master="$(basename "$(readlink "/sys/class/net/$LAN_TAP/master" 2>/dev/null)" 2>/dev/null)"
+    if [ "$current_master" != "$NATIVE_TETHER_BRIDGE" ]; then
+        ip link set dev "$LAN_TAP" nomaster 2>/dev/null || true
+        ip link set dev "$LAN_TAP" master "$NATIVE_TETHER_BRIDGE"
+    fi
+    ip link set dev "$LAN_TAP" up
+    ip link set dev "$NATIVE_TETHER_BRIDGE" up
+    # Android's IpServer may restore 192.168.0.1 after an upstream change.
+    # Keep the native bridge itself, its MAC and all vendor ports untouched;
+    # only move its IPv4 management address into OpenWrt's LAN subnet.
+    current_ipv4="$(ip -4 -o addr show dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null | awk '{print $4}')"
+    if [ "$current_ipv4" != "$LAN_HOST_IP/24" ]; then
+        ip -4 addr flush dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null || true
+        ip -4 addr add "$LAN_HOST_IP/24" dev "$NATIVE_TETHER_BRIDGE"
+    fi
+}
+
+restore_direct_br0() {
+    ip link set dev "$LAN_TAP" nomaster 2>/dev/null || true
+    if [ -e "/sys/class/net/$NATIVE_TETHER_BRIDGE" ] && [ -r "$DIRECT_BR0_ADDR_FILE" ]; then
+        ip -4 addr flush dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null || true
+        while read -r saved_addr; do
+            [ -n "$saved_addr" ] && \
+                ip -4 addr add "$saved_addr" dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null || true
+        done < "$DIRECT_BR0_ADDR_FILE"
+    fi
+    rm -f "$DIRECT_BR0_ADDR_FILE"
+}
+
 sync_tether_network() {
     case "$EFFECTIVE_TETHER_MODE" in
         routed) sync_routed_tethers ;;
         proxyarp) sync_proxyarp_tethers ;;
+        directbr0) sync_direct_br0 ;;
         *) sync_bridge_ports ;;
     esac
 }
@@ -685,6 +746,10 @@ refresh_ipv6() {
 detach_bridge_ports() {
     clear_routed_tethers
     clear_proxyarp_tethers
+    if [ "$EFFECTIVE_TETHER_MODE" = directbr0 ]; then
+        restore_direct_br0
+        return 0
+    fi
     for path in /sys/class/net/*; do
         iface="${path##*/}"
         bridge_detach "$iface"
@@ -743,6 +808,7 @@ sync_dhcp_block() {
 }
 
 setup_network() {
+    echo "$EFFECTIVE_TETHER_MODE" > "$ACTIVE_MODE_FILE"
     for tap in "$WAN_TAP" "$LAN_TAP"; do
         ip tuntap add dev "$tap" mode tap 2>/dev/null || true
     done
@@ -750,19 +816,26 @@ setup_network() {
     ip addr add "$WAN_HOST_IP/24" dev "$WAN_TAP"
     ip link set "$WAN_TAP" up
 
-    ip link add name "$LAN_BRIDGE" type bridge 2>/dev/null || true
-    ip link set dev "$LAN_BRIDGE" address 02:00:00:00:88:02
-    ip link set "$LAN_BRIDGE" up
-    ip addr flush dev "$LAN_TAP" 2>/dev/null
-    ip link set "$LAN_TAP" up
-    ip link set dev "$LAN_TAP" master "$LAN_BRIDGE"
-    ip addr flush dev "$LAN_BRIDGE" 2>/dev/null
-    if [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
-        ip addr add "$LAN_HOST_IP/32" dev "$LAN_BRIDGE"
+    if [ "$EFFECTIVE_TETHER_MODE" = directbr0 ]; then
+        save_direct_br0_state
+        ip addr flush dev "$LAN_TAP" 2>/dev/null
+        ip link set "$LAN_TAP" up
+        sync_direct_br0
     else
-        ip addr add "$LAN_HOST_IP/24" dev "$LAN_BRIDGE"
+        ip link add name "$LAN_BRIDGE" type bridge 2>/dev/null || true
+        ip link set dev "$LAN_BRIDGE" address 02:00:00:00:88:02
+        ip link set "$LAN_BRIDGE" up
+        ip addr flush dev "$LAN_TAP" 2>/dev/null
+        ip link set "$LAN_TAP" up
+        ip link set dev "$LAN_TAP" master "$LAN_BRIDGE"
+        ip addr flush dev "$LAN_BRIDGE" 2>/dev/null
+        if [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
+            ip addr add "$LAN_HOST_IP/32" dev "$LAN_BRIDGE"
+        else
+            ip addr add "$LAN_HOST_IP/24" dev "$LAN_BRIDGE"
+        fi
+        sync_tether_network
     fi
-    sync_tether_network
     sync_ipv6_downstream
 
     # Let the Android host itself reach the OpenWrt subnets (default policy
@@ -840,8 +913,10 @@ teardown_network() {
     delete_ip6_jump_and_chain OUTPUT OWT6_OUT
     delete_ip6_jump_and_chain FORWARD OWT6_ROUTED
     ip link set "$LAN_TAP" nomaster 2>/dev/null || true
-    ip link set "$LAN_BRIDGE" down 2>/dev/null || true
-    ip link delete "$LAN_BRIDGE" type bridge 2>/dev/null || true
+    if [ "$EFFECTIVE_TETHER_MODE" != directbr0 ]; then
+        ip link set "$LAN_BRIDGE" down 2>/dev/null || true
+        ip link delete "$LAN_BRIDGE" type bridge 2>/dev/null || true
+    fi
     for tap in "$WAN_TAP" "$LAN_TAP"; do
         ip link set "$tap" down 2>/dev/null || true
         ip tuntap del dev "$tap" mode tap 2>/dev/null || ip link delete "$tap" 2>/dev/null || true
@@ -850,6 +925,7 @@ teardown_network() {
         cat "$VM_DIR/ip_forward.original" > /proc/sys/net/ipv4/ip_forward
         rm -f "$VM_DIR/ip_forward.original"
     fi
+    rm -f "$ACTIVE_MODE_FILE"
 }
 
 # Steer Android's own locally generated traffic through OpenWrt. Tethered
@@ -892,6 +968,7 @@ untakeover() {
 network_monitor() {
     load_config
     resolve_device_config
+    use_active_tether_mode
     while is_running; do
         sync_tether_network
         sync_ipv6_downstream
@@ -925,6 +1002,17 @@ preflight_vm() {
     resolve_device_config
     if [ "$UNSAFE_NATIVE_BRIDGE" = 1 ] && [ "$EFFECTIVE_TETHER_MODE" = bridge ]; then
         die "TETHER_MODE=bridge is unsafe on MU300/UMS9620 sprd_wlan_combo; use auto, proxyarp, or routed"
+    fi
+    if [ "$EFFECTIVE_TETHER_MODE" = directbr0 ]; then
+        [ -d "/sys/class/net/$NATIVE_TETHER_BRIDGE/bridge" ] || \
+            die "TETHER_MODE=directbr0 requires native bridge $NATIVE_TETHER_BRIDGE"
+        for member_path in "/sys/class/net/$NATIVE_TETHER_BRIDGE/brif"/owrt-* \
+                "/sys/class/net/$NATIVE_TETHER_BRIDGE/brif"/owx-*; do
+            [ -e "$member_path" ] || continue
+            member="${member_path##*/}"
+            [ "$member" = "$LAN_TAP" ] || \
+                die "directbr0 refuses unexpected project port $member on $NATIVE_TETHER_BRIDGE"
+        done
     fi
     [ "$(getprop ro.product.cpu.abi 2>/dev/null)" = arm64-v8a ] || \
         die "only arm64-v8a Android hosts are supported"
@@ -1041,6 +1129,7 @@ start_vm() {
 stop_vm() {
     load_config
     resolve_device_config
+    use_active_tether_mode
     stop_monitor
     if ! is_running; then
         rm -f "$PIDFILE" "$SOCKET"
@@ -1071,6 +1160,7 @@ stop_vm() {
 status_vm() {
     load_config
     resolve_device_config
+    use_active_tether_mode
     if is_running; then
         bridge_ports="$(ls "/sys/class/net/$LAN_BRIDGE/brif" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
         echo "running PID=$(cat "$PIDFILE") wan=$WAN_GUEST_IP lan=$LAN_GUEST_IP tether_mode=$EFFECTIVE_TETHER_MODE bridge=$LAN_BRIDGE ports=${bridge_ports:-none} ipv6_passthrough=$IPV6_PASSTHROUGH ssh=localhost:$SSH_DNAT_PORT"

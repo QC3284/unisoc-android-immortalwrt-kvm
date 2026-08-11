@@ -272,8 +272,8 @@ validate_config() {
     [[ "$CELLULAR_ROUTE_TABLE" =~ ^(auto|[A-Za-z0-9_.-]+)$ ]] || die "invalid CELLULAR_ROUTE_TABLE"
     [[ -n "$TETHER_IFACE_PATTERNS" && "$TETHER_IFACE_PATTERNS" =~ ^[A-Za-z0-9_.*?+-]+([[:space:]]+[A-Za-z0-9_.*?+-]+)*$ ]] || \
         die "invalid TETHER_IFACE_PATTERNS"
-    [[ "$TETHER_MODE" == auto || "$TETHER_MODE" == bridge || "$TETHER_MODE" == routed || "$TETHER_MODE" == proxyarp ]] || \
-        die "TETHER_MODE must be auto, bridge, routed, or proxyarp"
+    [[ "$TETHER_MODE" == auto || "$TETHER_MODE" == bridge || "$TETHER_MODE" == routed || "$TETHER_MODE" == proxyarp || "$TETHER_MODE" == directbr0 ]] || \
+        die "TETHER_MODE must be auto, bridge, routed, proxyarp, or directbr0"
 }
 
 install_dependencies() {
