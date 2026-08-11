@@ -569,6 +569,23 @@ require_install() {
     device_has_manager || die "OpenWrt is not installed; run install first"
 }
 
+read_vm_status() {
+    local output rc=0
+    if output="$(device_manager status | tr -d '\r')"; then
+        :
+    else
+        rc=$?
+    fi
+    case "$output" in
+        running*|stopped)
+            printf '%s\n' "$output"
+            return 0
+            ;;
+    esac
+    echo "deploy-openwrt: cannot query VM state (rc=$rc): ${output:-no status returned}" >&2
+    return 1
+}
+
 backup_vm() {
     (($# <= 1)) || die "usage: ./deploy-openwrt.sh backup [OUTPUT.img.gz]"
     check_device
@@ -592,7 +609,7 @@ backup_vm() {
     kernel_sha256="$(adb_cmd shell "su 0 sh -c 'sha256sum $DEVICE_DIR/Image'" | tr -d '\r' | awk '{print $1}')"
     [[ "$kernel_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || die "cannot record VM kernel checksum"
 
-    status="$(device_manager status | tr -d '\r')"
+    status="$(read_vm_status)" || die "cannot determine VM state before backup"
     case "$status" in
         running*)
             was_running=1
@@ -633,12 +650,17 @@ backup_vm() {
 }
 
 build_restore_helper() {
+    local helper_description
     mkdir -p "$BUILD_DIR/tools"
     say "Building Android ARM64 sparse restore helper"
     aarch64-linux-gnu-gcc -O2 -static -s -Wall -Wextra \
         -o "$BUILD_DIR/tools/sparse-writer" "$SCRIPT_DIR/tools/sparse_writer.c"
-    file "$BUILD_DIR/tools/sparse-writer" | grep -q 'ARM aarch64.*statically linked' || \
+    helper_description="$(file "$BUILD_DIR/tools/sparse-writer")" || \
+        die "cannot inspect sparse restore helper"
+    echo "$helper_description"
+    [[ "$helper_description" == *"ARM aarch64"* && "$helper_description" == *"statically linked"* ]] || \
         die "sparse restore helper is not a static ARM64 executable"
+    return 0
 }
 
 restore_vm() {
@@ -685,7 +707,8 @@ restore_vm() {
     install_dependencies
     build_restore_helper
 
-    status="$(device_manager status | tr -d '\r')"
+    status="$(read_vm_status)" || \
+        die "cannot query VM state before restore; check the ADB connection"
     case "$status" in
         running*)
             was_running=1
