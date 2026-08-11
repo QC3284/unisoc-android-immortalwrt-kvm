@@ -109,6 +109,32 @@ Linux bridge、crosvm 命令行兼容性和接口配置，失败时会给出具�
 ./deploy-openwrt.sh ssh
 ```
 
+也可以完全脱离电脑端部署脚本，在 Android 的 ADB root shell 中管理已经安装的
+VM：
+
+```sh
+adb shell
+su
+/data/local/openwrt/openwrt.sh status
+/data/local/openwrt/openwrt.sh start
+/data/local/openwrt/openwrt.sh stop
+/data/local/openwrt/openwrt.sh restart
+/data/local/openwrt/openwrt.sh logs 200
+```
+
+或者直接从电脑执行单条命令：
+
+```sh
+adb shell "su 0 sh -c '/data/local/openwrt/openwrt.sh status'"
+adb shell "su 0 sh -c '/data/local/openwrt/openwrt.sh start'"
+adb shell "su 0 sh -c '/data/local/openwrt/openwrt.sh stop'"
+adb shell "su 0 sh -c '/data/local/openwrt/openwrt.sh restart'"
+```
+
+应始终使用 `openwrt.sh` 启停，不要直接 `kill` crosvm；管理脚本会同时建立或
+还原 TAP、网桥、转发规则、DHCP 防护及 Android 网络状态。镜像备份和恢复仍应
+使用电脑端的 `deploy-openwrt.sh backup` 与 `deploy-openwrt.sh restore`。
+
 修改 `device/openwrt.sh` 后，不需要重新构建和上传镜像：
 
 ```bash
