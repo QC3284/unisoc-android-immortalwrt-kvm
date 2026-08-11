@@ -198,6 +198,21 @@ is_tether_candidate() {
     matches_tether_pattern "$iface" && is_tethered "$iface"
 }
 
+# Potential downstreams must be protected before Android reports TetheredState.
+# Otherwise IpServer can leak its first .0.x/42.x DHCP offer during USB gadget
+# recreation, before the network monitor has attached the interface to OpenWrt.
+is_tether_capable() {
+    iface="$1"
+    if [ "$TETHER_IFACE_PATTERNS" != auto ]; then
+        matches_tether_pattern "$iface"
+        return
+    fi
+    case "$iface" in
+        sipa_usb*|rndis*|wlan*|softap*|ap_br_wlan*|ap_br_softap*|bt-pan) return 0 ;;
+    esac
+    return 1
+}
+
 is_running() {
     [ -r "$PIDFILE" ] || return 1
     pid="$(cat "$PIDFILE" 2>/dev/null)"
@@ -792,9 +807,17 @@ sync_dhcp_block() {
     iptables -N OWT_OUT 2>/dev/null || true
     iptables -F OWT_OUT
     iptables -A OWT_OUT -o "$LAN_BRIDGE" -p udp --sport 67 --dport 68 -j DROP
+    if [ "$TETHER_IFACE_PATTERNS" = auto ]; then
+        # A trailing '+' is iptables' interface-prefix wildcard and remains
+        # effective even while gadget reconfiguration removes the netdev.
+        for iface_prefix in sipa_usb+ rndis+ wlan+ softap+ ap_br_wlan+ ap_br_softap+; do
+            iptables -A OWT_OUT -o "$iface_prefix" -p udp --sport 67 --dport 68 -j DROP
+        done
+        iptables -A OWT_OUT -o bt-pan -p udp --sport 67 --dport 68 -j DROP
+    fi
     for path in /sys/class/net/*; do
         iface="${path##*/}"
-        is_tether_candidate "$iface" || continue
+        is_tether_capable "$iface" || continue
         iptables -A OWT_OUT -o "$iface" -p udp --sport 67 --dport 68 -j DROP
         if [ -d "$path/bridge" ]; then
             for member_path in "$path"/brif/*; do
@@ -809,6 +832,8 @@ sync_dhcp_block() {
 
 setup_network() {
     echo "$EFFECTIVE_TETHER_MODE" > "$ACTIVE_MODE_FILE"
+    # Install the DHCP guard before TAP/bridge changes close the lifecycle race.
+    sync_dhcp_block
     for tap in "$WAN_TAP" "$LAN_TAP"; do
         ip tuntap add dev "$tap" mode tap 2>/dev/null || true
     done
