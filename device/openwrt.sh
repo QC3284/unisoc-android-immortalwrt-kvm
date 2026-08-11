@@ -51,6 +51,8 @@ PROXYARP_IFACES_FILE="$VM_DIR/proxyarp-tethers"
 DIRECT_BR0_ADDR_FILE="$VM_DIR/direct-br0.addr"
 EFFECTIVE_TETHER_MODE=""
 EFFECTIVE_CPU_AFFINITY=""
+EFFECTIVE_CPU_CAPACITY=""
+EFFECTIVE_CPU_CLUSTERS=""
 UNSAFE_NATIVE_BRIDGE=0
 
 die() {
@@ -146,6 +148,8 @@ detect_cellular_iface() {
 
 resolve_cpu_affinity() {
     EFFECTIVE_CPU_AFFINITY=""
+    EFFECTIVE_CPU_CAPACITY=""
+    EFFECTIVE_CPU_CLUSTERS=""
     case "$VM_CPU_AFFINITY" in
         none) return 0 ;;
         auto)
@@ -167,6 +171,30 @@ resolve_cpu_affinity() {
             EFFECTIVE_CPU_AFFINITY="$(printf '%s\n' "$selected_cpus" | awk '
                 { if (NR > 1) printf ":"; printf "%d=%s", NR - 1, $2 }
                 END { print "" }
+            ')"
+            # Tell the guest scheduler that a vCPU pinned to a little core is
+            # not equivalent to one pinned to a big core. Normalize either
+            # cpu_capacity or the cpufreq fallback to crosvm's 1024 scale.
+            EFFECTIVE_CPU_CAPACITY="$(printf '%s\n' "$selected_cpus" | awk '
+                NR == 1 { max = $1 }
+                {
+                    capacity = max > 0 ? int(($1 * 1024 + max / 2) / max) : 1024
+                    if (capacity < 1) capacity = 1
+                    if (NR > 1) printf ","
+                    printf "%d=%d", NR - 1, capacity
+                }
+                END { print "" }
+            ')"
+            # selected_cpus is capacity-sorted, so equal-capacity vCPUs are
+            # contiguous and can be represented as crosvm CPU clusters.
+            EFFECTIVE_CPU_CLUSTERS="$(printf '%s\n' "$selected_cpus" | awk '
+                function emit(first, last) {
+                    if (output != "") output = output " "
+                    output = output (first == last ? first : first "-" last)
+                }
+                NR == 1 { previous = $1; first = 0; next }
+                $1 != previous { emit(first, NR - 2); first = NR - 1; previous = $1 }
+                END { if (NR > 0) emit(first, NR - 1); print output }
             ')"
             ;;
         *[!0-9,:=-]*|'') die "invalid VM_CPU_AFFINITY: $VM_CPU_AFFINITY" ;;
@@ -205,6 +233,14 @@ resolve_device_config() {
     if [ -n "$EFFECTIVE_CPU_AFFINITY" ] && \
             ! echo "$crosvm_help" | grep -q -- '--cpu-affinity'; then
         die "selected crosvm does not support --cpu-affinity"
+    fi
+    if [ -n "$EFFECTIVE_CPU_CAPACITY" ] && \
+            ! echo "$crosvm_help" | grep -q -- '--cpu-capacity'; then
+        die "selected crosvm does not support --cpu-capacity"
+    fi
+    if [ -n "$EFFECTIVE_CPU_CLUSTERS" ] && \
+            ! echo "$crosvm_help" | grep -q -- '--cpu-cluster'; then
+        die "selected crosvm does not support --cpu-cluster"
     fi
 
     if [ "$CELLULAR_IFACE" = auto ]; then
@@ -1139,7 +1175,7 @@ preflight_vm() {
     done
     [ -n "$matched" ] || \
         die "TETHER_IFACE_PATTERNS matches no current interface"
-    echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cpus=$VM_CPUS affinity=${EFFECTIVE_CPU_AFFINITY:-none} cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} mode=$EFFECTIVE_TETHER_MODE ipv6_passthrough=$IPV6_PASSTHROUGH"
+    echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cpus=$VM_CPUS affinity=${EFFECTIVE_CPU_AFFINITY:-none} capacity=${EFFECTIVE_CPU_CAPACITY:-none} clusters=${EFFECTIVE_CPU_CLUSTERS:-none} cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} mode=$EFFECTIVE_TETHER_MODE ipv6_passthrough=$IPV6_PASSTHROUGH"
 }
 
 start_vm() {
@@ -1160,12 +1196,21 @@ start_vm() {
     cpu_affinity_arg=""
     [ -n "$EFFECTIVE_CPU_AFFINITY" ] && \
         cpu_affinity_arg="--cpu-affinity=$EFFECTIVE_CPU_AFFINITY"
+    cpu_capacity_arg=""
+    [ -n "$EFFECTIVE_CPU_CAPACITY" ] && \
+        cpu_capacity_arg="--cpu-capacity=$EFFECTIVE_CPU_CAPACITY"
+    cpu_cluster_args=""
+    for cpu_cluster in $EFFECTIVE_CPU_CLUSTERS; do
+        cpu_cluster_args="$cpu_cluster_args --cpu-cluster=$cpu_cluster"
+    done
 
     if [ "$CROSVM_STYLE" = block ]; then
         nohup "$CROSVM" run \
             --disable-sandbox \
             --cpus "$VM_CPUS" \
             $cpu_affinity_arg \
+            $cpu_capacity_arg \
+            $cpu_cluster_args \
             --mem "$VM_MEMORY_MIB" \
             --socket "$SOCKET" \
             --serial "type=file,path=$CONSOLE,hardware=serial,num=1,console" \
@@ -1179,6 +1224,8 @@ start_vm() {
             --disable-sandbox \
             --cpus "$VM_CPUS" \
             $cpu_affinity_arg \
+            $cpu_capacity_arg \
+            $cpu_cluster_args \
             --mem "$VM_MEMORY_MIB" \
             --socket "$SOCKET" \
             --serial "type=file,path=$CONSOLE,hardware=serial,num=1,console" \

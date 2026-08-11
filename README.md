@@ -45,6 +45,9 @@ VM_CPU_AFFINITY=auto   # 自动一一绑定到当前 Android 最快的四个在�
 # VM_CPU_AFFINITY=none             # 不绑核，交给 Android 调度
 # VM_CPU_AFFINITY='0=4:1=5:2=6:3=0' # 也可以显式指定 guest=host 映射
 
+# 使用 auto 时还会向 OpenWrt 描述大小核 capacity 和 cluster，
+# 让 Clash 等重负载优先调度到大核。
+
 AUTO_TAKEOVER=0  # Android/SIM/应用直连，只有热点和 USB 客户端走 OpenWrt
 AUTO_TAKEOVER=1  # Android 本机应用流量也由 OpenWrt 接管
 
