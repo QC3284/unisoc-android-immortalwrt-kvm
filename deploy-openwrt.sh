@@ -272,8 +272,8 @@ validate_config() {
     [[ "$CELLULAR_ROUTE_TABLE" =~ ^(auto|[A-Za-z0-9_.-]+)$ ]] || die "invalid CELLULAR_ROUTE_TABLE"
     [[ -n "$TETHER_IFACE_PATTERNS" && "$TETHER_IFACE_PATTERNS" =~ ^[A-Za-z0-9_.*?+-]+([[:space:]]+[A-Za-z0-9_.*?+-]+)*$ ]] || \
         die "invalid TETHER_IFACE_PATTERNS"
-    [[ "$TETHER_MODE" == auto || "$TETHER_MODE" == bridge || "$TETHER_MODE" == routed ]] || \
-        die "TETHER_MODE must be auto, bridge, or routed"
+    [[ "$TETHER_MODE" == auto || "$TETHER_MODE" == bridge || "$TETHER_MODE" == routed || "$TETHER_MODE" == proxyarp ]] || \
+        die "TETHER_MODE must be auto, bridge, routed, or proxyarp"
 }
 
 install_dependencies() {
@@ -297,6 +297,10 @@ build_tools() {
     aarch64-linux-gnu-gcc -O2 -static -s -Wall -Wextra \
         -o "$BUILD_DIR/tools/kvm-probe" "$SCRIPT_DIR/tools/kvm_probe.c"
     file "$BUILD_DIR/tools/kvm-probe"
+    say "Building Android ARM64 DHCP frame relay"
+    aarch64-linux-gnu-gcc -O2 -static -s -Wall -Wextra \
+        -o "$BUILD_DIR/tools/dhcp-relay" "$SCRIPT_DIR/tools/dhcp_relay.c"
+    file "$BUILD_DIR/tools/dhcp-relay"
     [[ -x "$BUNDLED_CROSVM" ]] || die "missing bundled crosvm: $BUNDLED_CROSVM"
     file "$BUNDLED_CROSVM" | grep -q 'ARM aarch64.*statically linked' || \
         die "bundled crosvm is not a static ARM64 executable"
@@ -473,6 +477,7 @@ deploy() {
     adb_cmd push "$(adb_path "$SCRIPT_DIR/device/openwrt.sh")" "$STAGE_DIR/openwrt.sh"
     adb_cmd push "$(adb_path "$BUILD_DIR/tools/ra6")" "$STAGE_DIR/ra6"
     adb_cmd push "$(adb_path "$BUILD_DIR/tools/kvm-probe")" "$STAGE_DIR/kvm-probe"
+    adb_cmd push "$(adb_path "$BUILD_DIR/tools/dhcp-relay")" "$STAGE_DIR/dhcp-relay"
     adb_cmd push "$(adb_path "$BUNDLED_CROSVM")" "$STAGE_DIR/crosvm"
 
     verify_device_sha256 "$BUILD_DIR/Image" "$STAGE_DIR/Image"
@@ -480,15 +485,17 @@ deploy() {
     verify_device_sha256 "$SCRIPT_DIR/device/openwrt.sh" "$STAGE_DIR/openwrt.sh"
     verify_device_sha256 "$BUILD_DIR/tools/ra6" "$STAGE_DIR/ra6"
     verify_device_sha256 "$BUILD_DIR/tools/kvm-probe" "$STAGE_DIR/kvm-probe"
+    verify_device_sha256 "$BUILD_DIR/tools/dhcp-relay" "$STAGE_DIR/dhcp-relay"
     verify_device_sha256 "$BUNDLED_CROSVM" "$STAGE_DIR/crosvm"
 
     refuse_existing_image
-    adb_cmd shell "su 0 sh -c 'mkdir -p $DEVICE_DIR && mv $STAGE_DIR/openwrt.img $DEVICE_DIR/openwrt.img && mv $STAGE_DIR/Image $DEVICE_DIR/Image && mv $STAGE_DIR/vm.conf $DEVICE_DIR/vm.conf && mv $STAGE_DIR/openwrt.sh $DEVICE_DIR/openwrt.sh && mv $STAGE_DIR/ra6 $DEVICE_DIR/ra6 && mv $STAGE_DIR/kvm-probe $DEVICE_DIR/kvm-probe && mv $STAGE_DIR/crosvm $DEVICE_DIR/crosvm && chmod 700 $DEVICE_DIR $DEVICE_DIR/openwrt.sh $DEVICE_DIR/ra6 $DEVICE_DIR/kvm-probe $DEVICE_DIR/crosvm && chmod 600 $DEVICE_DIR/openwrt.img $DEVICE_DIR/Image $DEVICE_DIR/vm.conf && chown -R root:root $DEVICE_DIR && rmdir $STAGE_DIR && sync'"
+    adb_cmd shell "su 0 sh -c 'mkdir -p $DEVICE_DIR && mv $STAGE_DIR/openwrt.img $DEVICE_DIR/openwrt.img && mv $STAGE_DIR/Image $DEVICE_DIR/Image && mv $STAGE_DIR/vm.conf $DEVICE_DIR/vm.conf && mv $STAGE_DIR/openwrt.sh $DEVICE_DIR/openwrt.sh && mv $STAGE_DIR/ra6 $DEVICE_DIR/ra6 && mv $STAGE_DIR/kvm-probe $DEVICE_DIR/kvm-probe && mv $STAGE_DIR/dhcp-relay $DEVICE_DIR/dhcp-relay && mv $STAGE_DIR/crosvm $DEVICE_DIR/crosvm && chmod 700 $DEVICE_DIR $DEVICE_DIR/openwrt.sh $DEVICE_DIR/ra6 $DEVICE_DIR/kvm-probe $DEVICE_DIR/dhcp-relay $DEVICE_DIR/crosvm && chmod 600 $DEVICE_DIR/openwrt.img $DEVICE_DIR/Image $DEVICE_DIR/vm.conf && chown -R root:root $DEVICE_DIR && rmdir $STAGE_DIR && sync'"
     verify_device_sha256 "$BUILD_DIR/Image" "$DEVICE_DIR/Image"
     verify_device_sha256 "$BUILD_DIR/vm.conf" "$DEVICE_DIR/vm.conf"
     verify_device_sha256 "$SCRIPT_DIR/device/openwrt.sh" "$DEVICE_DIR/openwrt.sh"
     verify_device_sha256 "$BUILD_DIR/tools/ra6" "$DEVICE_DIR/ra6"
     verify_device_sha256 "$BUILD_DIR/tools/kvm-probe" "$DEVICE_DIR/kvm-probe"
+    verify_device_sha256 "$BUILD_DIR/tools/dhcp-relay" "$DEVICE_DIR/dhcp-relay"
     verify_device_sha256 "$BUNDLED_CROSVM" "$DEVICE_DIR/crosvm"
     device_manager preflight
     device_manager start
@@ -496,7 +503,7 @@ deploy() {
     cat <<EOF
 
 OpenWrt is booting. First boot takes 30-60s.
-SSH:      ssh root@192.168.88.1           (from a bridged USB/hotspot client)
+SSH:      ssh root@192.168.88.1           (from a managed USB/hotspot client)
 Web:      http://192.168.88.1             (LuCI from the OpenWrt LAN)
 Password: $OPENWRT_PASSWORD
 Topology: WAN 192.168.66.2 <-> host 192.168.66.1 (NAT out)
@@ -520,11 +527,13 @@ update_manager() {
     adb_cmd push "$(adb_path "$SCRIPT_DIR/device/openwrt.sh")" /data/local/tmp/openwrt.sh.new
     adb_cmd push "$(adb_path "$BUILD_DIR/tools/ra6")" /data/local/tmp/ra6.new
     adb_cmd push "$(adb_path "$BUILD_DIR/tools/kvm-probe")" /data/local/tmp/kvm-probe.new
+    adb_cmd push "$(adb_path "$BUILD_DIR/tools/dhcp-relay")" /data/local/tmp/dhcp-relay.new
     adb_cmd push "$(adb_path "$BUNDLED_CROSVM")" /data/local/tmp/crosvm.new
-    adb_cmd shell "su 0 sh -c 'cp /data/local/tmp/openwrt.sh.new $DEVICE_DIR/openwrt.sh && cp /data/local/tmp/ra6.new $DEVICE_DIR/ra6.next && cp /data/local/tmp/kvm-probe.new $DEVICE_DIR/kvm-probe.next && cp /data/local/tmp/crosvm.new $DEVICE_DIR/crosvm.next && chown root:root $DEVICE_DIR/openwrt.sh $DEVICE_DIR/ra6.next $DEVICE_DIR/kvm-probe.next $DEVICE_DIR/crosvm.next && chmod 700 $DEVICE_DIR/openwrt.sh $DEVICE_DIR/ra6.next $DEVICE_DIR/kvm-probe.next $DEVICE_DIR/crosvm.next && mv -f $DEVICE_DIR/ra6.next $DEVICE_DIR/ra6 && mv -f $DEVICE_DIR/kvm-probe.next $DEVICE_DIR/kvm-probe && mv -f $DEVICE_DIR/crosvm.next $DEVICE_DIR/crosvm && rm -f /data/local/tmp/openwrt.sh.new /data/local/tmp/ra6.new /data/local/tmp/kvm-probe.new /data/local/tmp/crosvm.new && sync'"
+    adb_cmd shell "su 0 sh -c 'cp /data/local/tmp/openwrt.sh.new $DEVICE_DIR/openwrt.sh && cp /data/local/tmp/ra6.new $DEVICE_DIR/ra6.next && cp /data/local/tmp/kvm-probe.new $DEVICE_DIR/kvm-probe.next && cp /data/local/tmp/dhcp-relay.new $DEVICE_DIR/dhcp-relay.next && cp /data/local/tmp/crosvm.new $DEVICE_DIR/crosvm.next && chown root:root $DEVICE_DIR/openwrt.sh $DEVICE_DIR/ra6.next $DEVICE_DIR/kvm-probe.next $DEVICE_DIR/dhcp-relay.next $DEVICE_DIR/crosvm.next && chmod 700 $DEVICE_DIR/openwrt.sh $DEVICE_DIR/ra6.next $DEVICE_DIR/kvm-probe.next $DEVICE_DIR/dhcp-relay.next $DEVICE_DIR/crosvm.next && mv -f $DEVICE_DIR/ra6.next $DEVICE_DIR/ra6 && mv -f $DEVICE_DIR/kvm-probe.next $DEVICE_DIR/kvm-probe && mv -f $DEVICE_DIR/dhcp-relay.next $DEVICE_DIR/dhcp-relay && mv -f $DEVICE_DIR/crosvm.next $DEVICE_DIR/crosvm && rm -f /data/local/tmp/openwrt.sh.new /data/local/tmp/ra6.new /data/local/tmp/kvm-probe.new /data/local/tmp/dhcp-relay.new /data/local/tmp/crosvm.new && sync'"
     verify_device_sha256 "$SCRIPT_DIR/device/openwrt.sh" "$DEVICE_DIR/openwrt.sh"
     verify_device_sha256 "$BUILD_DIR/tools/ra6" "$DEVICE_DIR/ra6"
     verify_device_sha256 "$BUILD_DIR/tools/kvm-probe" "$DEVICE_DIR/kvm-probe"
+    verify_device_sha256 "$BUILD_DIR/tools/dhcp-relay" "$DEVICE_DIR/dhcp-relay"
     verify_device_sha256 "$BUNDLED_CROSVM" "$DEVICE_DIR/crosvm"
     sync_device_config
     device_manager preflight

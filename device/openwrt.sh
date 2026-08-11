@@ -12,6 +12,7 @@ PIDFILE="$VM_DIR/crosvm.pid"
 MONITOR_PIDFILE="$VM_DIR/network-monitor.pid"
 RA6="$VM_DIR/ra6"
 KVM_PROBE="$VM_DIR/kvm-probe"
+DHCP_RELAY="$VM_DIR/dhcp-relay"
 IPV6_PREFIX_FILE="$VM_DIR/ipv6-prefix"
 TAKEOVER_FLAG="$VM_DIR/takeover.enabled"
 SOCKET="$VM_DIR/crosvm.sock"
@@ -43,6 +44,7 @@ HOST_ROUTE_PRIO=1049
 SSH_DNAT_PORT=2223
 WEB_DNAT_PORT=8080
 ROUTED_IFACES_FILE="$VM_DIR/routed-tethers"
+PROXYARP_IFACES_FILE="$VM_DIR/proxyarp-tethers"
 EFFECTIVE_TETHER_MODE=""
 UNSAFE_NATIVE_BRIDGE=0
 
@@ -69,8 +71,8 @@ load_config() {
         *) die "IPV6_PASSTHROUGH must be 0 or 1" ;;
     esac
     case "$TETHER_MODE" in
-        auto|bridge|routed) ;;
-        *) die "TETHER_MODE must be auto, bridge, or routed" ;;
+        auto|bridge|routed|proxyarp) ;;
+        *) die "TETHER_MODE must be auto, bridge, routed, or proxyarp" ;;
     esac
 }
 
@@ -86,12 +88,12 @@ resolve_tether_mode() {
         UNSAFE_NATIVE_BRIDGE=1
     fi
     case "$TETHER_MODE" in
-        bridge|routed) EFFECTIVE_TETHER_MODE="$TETHER_MODE" ;;
+        bridge|routed|proxyarp) EFFECTIVE_TETHER_MODE="$TETHER_MODE" ;;
         auto)
             # UMS9620's Android 13 sprd_wlan_combo driver corrupts an skb when
             # its native hotspot bridge is extended with another Linux bridge.
             if [ "$UNSAFE_NATIVE_BRIDGE" = 1 ]; then
-                EFFECTIVE_TETHER_MODE=routed
+                EFFECTIVE_TETHER_MODE=proxyarp
             else
                 EFFECTIVE_TETHER_MODE=bridge
             fi
@@ -299,15 +301,121 @@ sync_bridge_ports() {
 }
 
 ensure_owrt_routes() {
-    ip route replace "$LAN_SUBNET" dev "$LAN_BRIDGE" table "$OWRT_TABLE"
+    if [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
+        ip route replace "$LAN_GUEST_IP/32" dev "$LAN_BRIDGE" table "$OWRT_TABLE"
+        ip route replace default via "$LAN_GUEST_IP" dev "$LAN_BRIDGE" onlink table "$OWRT_TABLE"
+    else
+        ip route replace "$LAN_SUBNET" dev "$LAN_BRIDGE" table "$OWRT_TABLE"
+        ip route replace default via "$LAN_GUEST_IP" dev "$LAN_BRIDGE" table "$OWRT_TABLE"
+    fi
     ip route replace "$WAN_SUBNET" dev "$WAN_TAP" table "$OWRT_TABLE"
-    ip route replace default via "$LAN_GUEST_IP" dev "$LAN_BRIDGE" table "$OWRT_TABLE"
 }
 
 clear_routed_tethers() {
     while ip -4 rule del priority "$ROUTED_TETHER_RULE_PRIO" 2>/dev/null; do :; done
     delete_jump_and_chain nat PREROUTING OWT_RPRE
     rm -f "$ROUTED_IFACES_FILE"
+}
+
+stop_dhcp_relay() {
+    iface="$1"
+    pidfile="$VM_DIR/dhcp-relay-$iface.pid"
+    if [ -r "$pidfile" ]; then
+        relay_pid="$(cat "$pidfile" 2>/dev/null)"
+        if [ -n "$relay_pid" ] && [ -r "/proc/$relay_pid/cmdline" ] && \
+                tr '\000' ' ' < "/proc/$relay_pid/cmdline" | grep -q "$DHCP_RELAY"; then
+            kill "$relay_pid" 2>/dev/null || true
+        fi
+    fi
+    rm -f "$pidfile"
+}
+
+restore_proxyarp_iface() {
+    iface="$1"
+    stop_dhcp_relay "$iface"
+    ip route del "$LAN_SUBNET" dev "$iface" metric 42700 2>/dev/null || true
+    saved="$VM_DIR/proxyarp-$iface.original"
+    if [ -r "$saved" ] && [ -w "/proc/sys/net/ipv4/conf/$iface/proxy_arp" ]; then
+        cat "$saved" > "/proc/sys/net/ipv4/conf/$iface/proxy_arp"
+    fi
+    rm -f "$saved"
+}
+
+clear_proxyarp_tethers() {
+    if [ -r "$PROXYARP_IFACES_FILE" ]; then
+        while read -r iface; do
+            [ -n "$iface" ] && restore_proxyarp_iface "$iface"
+        done < "$PROXYARP_IFACES_FILE"
+    fi
+    for pidfile in "$VM_DIR"/dhcp-relay-*.pid; do
+        [ -e "$pidfile" ] || continue
+        iface="${pidfile##*/dhcp-relay-}"
+        iface="${iface%.pid}"
+        stop_dhcp_relay "$iface"
+    done
+    saved="$VM_DIR/proxyarp-$LAN_BRIDGE.original"
+    if [ -r "$saved" ] && [ -w "/proc/sys/net/ipv4/conf/$LAN_BRIDGE/proxy_arp" ]; then
+        cat "$saved" > "/proc/sys/net/ipv4/conf/$LAN_BRIDGE/proxy_arp"
+    fi
+    rm -f "$saved" "$PROXYARP_IFACES_FILE"
+    ip route del "$LAN_GUEST_IP/32" dev "$LAN_BRIDGE" 2>/dev/null || true
+}
+
+ensure_dhcp_relay() {
+    iface="$1"
+    pidfile="$VM_DIR/dhcp-relay-$iface.pid"
+    if [ -r "$pidfile" ]; then
+        relay_pid="$(cat "$pidfile" 2>/dev/null)"
+        if [ -n "$relay_pid" ] && [ -r "/proc/$relay_pid/cmdline" ] && \
+                tr '\000' ' ' < "/proc/$relay_pid/cmdline" | grep -Fq "$DHCP_RELAY $iface $LAN_TAP"; then
+            return 0
+        fi
+    fi
+    stop_dhcp_relay "$iface"
+    nohup "$DHCP_RELAY" "$iface" "$LAN_TAP" \
+        </dev/null >"$VM_DIR/dhcp-relay-$iface.log" 2>&1 &
+    echo "$!" > "$pidfile"
+}
+
+sync_proxyarp_tethers() {
+    desired="$VM_DIR/proxyarp-tethers.next"
+    : > "$desired"
+    for path in /sys/class/net/*; do
+        iface="${path##*/}"
+        is_tether_candidate "$iface" || continue
+        echo "$iface" >> "$desired"
+    done
+
+    if [ -r "$PROXYARP_IFACES_FILE" ]; then
+        while read -r iface; do
+            [ -n "$iface" ] || continue
+            grep -Fxq "$iface" "$desired" 2>/dev/null || restore_proxyarp_iface "$iface"
+        done < "$PROXYARP_IFACES_FILE"
+    fi
+
+    clear_routed_tethers
+    ensure_owrt_routes
+    ip route replace "$LAN_GUEST_IP/32" dev "$LAN_BRIDGE"
+    saved="$VM_DIR/proxyarp-$LAN_BRIDGE.original"
+    if [ ! -r "$saved" ]; then
+        cat "/proc/sys/net/ipv4/conf/$LAN_BRIDGE/proxy_arp" > "$saved"
+    fi
+    echo 1 > "/proc/sys/net/ipv4/conf/$LAN_BRIDGE/proxy_arp"
+
+    while read -r iface; do
+        [ -n "$iface" ] || continue
+        saved="$VM_DIR/proxyarp-$iface.original"
+        if [ ! -r "$saved" ]; then
+            cat "/proc/sys/net/ipv4/conf/$iface/proxy_arp" > "$saved"
+        fi
+        echo 1 > "/proc/sys/net/ipv4/conf/$iface/proxy_arp"
+        # The /32 keeps OpenWrt itself on owrt-br; the less-specific route
+        # sends all leased clients back to the untouched Android tether port.
+        ip route replace "$LAN_SUBNET" dev "$iface" metric 42700
+        ip -4 rule add priority "$ROUTED_TETHER_RULE_PRIO" iif "$iface" lookup "$OWRT_TABLE"
+        ensure_dhcp_relay "$iface"
+    done < "$desired"
+    mv -f "$desired" "$PROXYARP_IFACES_FILE"
 }
 
 sync_routed_tethers() {
@@ -318,6 +426,7 @@ sync_routed_tethers() {
         desired="${desired}${iface}
 "
     done
+    clear_proxyarp_tethers
     clear_routed_tethers
     ensure_owrt_routes
     iptables -t nat -N OWT_RPRE 2>/dev/null || true
@@ -337,11 +446,11 @@ sync_routed_tethers() {
 }
 
 sync_tether_network() {
-    if [ "$EFFECTIVE_TETHER_MODE" = routed ]; then
-        sync_routed_tethers
-    else
-        sync_bridge_ports
-    fi
+    case "$EFFECTIVE_TETHER_MODE" in
+        routed) sync_routed_tethers ;;
+        proxyarp) sync_proxyarp_tethers ;;
+        *) sync_bridge_ports ;;
+    esac
 }
 
 cellular_ipv6_prefix() {
@@ -551,10 +660,10 @@ sync_routed_ipv6_policy() {
 }
 
 sync_ipv6_downstream() {
-    # The safe routed fallback cannot advertise OpenWrt's LAN prefix without
-    # extending br0. Honour the switch by passing Android IPv6 at 1 and
-    # blocking downstream IPv6 at 0 so it cannot silently bypass OpenWrt.
-    if [ "$EFFECTIVE_TETHER_MODE" = routed ]; then
+    # The safe routed/proxy-ARP modes cannot advertise OpenWrt's LAN prefix
+    # without extending br0. Honour the switch by passing Android IPv6 at 1
+    # and blocking downstream IPv6 at 0 so it cannot silently bypass OpenWrt.
+    if [ "$EFFECTIVE_TETHER_MODE" = routed ] || [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
         sync_routed_ipv6_policy
         return 0
     fi
@@ -575,6 +684,7 @@ refresh_ipv6() {
 
 detach_bridge_ports() {
     clear_routed_tethers
+    clear_proxyarp_tethers
     for path in /sys/class/net/*; do
         iface="${path##*/}"
         bridge_detach "$iface"
@@ -647,7 +757,11 @@ setup_network() {
     ip link set "$LAN_TAP" up
     ip link set dev "$LAN_TAP" master "$LAN_BRIDGE"
     ip addr flush dev "$LAN_BRIDGE" 2>/dev/null
-    ip addr add "$LAN_HOST_IP/24" dev "$LAN_BRIDGE"
+    if [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
+        ip addr add "$LAN_HOST_IP/32" dev "$LAN_BRIDGE"
+    else
+        ip addr add "$LAN_HOST_IP/24" dev "$LAN_BRIDGE"
+    fi
     sync_tether_network
     sync_ipv6_downstream
 
@@ -705,7 +819,8 @@ setup_network() {
     ensure_jump nat PREROUTING OWT_PRE
 
     # Android owns AP/RNDIS lifecycle. Bridge mode moves DHCP/RA to OpenWrt;
-    # routed fallback retains Android DHCP and steers IPv4/DNS through OpenWrt.
+    # Routed fallback retains Android DHCP. Proxy-ARP and bridge modes suppress
+    # Android DHCP so OpenWrt is the only server clients can hear.
     sync_dhcp_block
 
 }
@@ -738,7 +853,7 @@ teardown_network() {
 }
 
 # Steer Android's own locally generated traffic through OpenWrt. Tethered
-# clients are Layer-2 bridge peers of OpenWrt and need no host policy rule.
+# clients use either a real Layer-2 bridge or their mode-specific ingress rule.
 takeover() {
     ip link show "$LAN_TAP" >/dev/null 2>&1 || die "run start first"
 
@@ -765,7 +880,7 @@ untakeover() {
     rm -f "$TAKEOVER_FLAG"
     while ip -4 rule del priority "$RULE_PRIO" 2>/dev/null; do :; done
     while ip -6 rule del priority "$IPV6_BLOCK_PRIO" 2>/dev/null; do :; done
-    if [ "$EFFECTIVE_TETHER_MODE" = routed ]; then
+    if [ "$EFFECTIVE_TETHER_MODE" = routed ] || [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
         ensure_owrt_routes
     else
         ip route flush table "$OWRT_TABLE" 2>/dev/null || true
@@ -809,12 +924,32 @@ preflight_vm() {
     load_config
     resolve_device_config
     if [ "$UNSAFE_NATIVE_BRIDGE" = 1 ] && [ "$EFFECTIVE_TETHER_MODE" = bridge ]; then
-        die "TETHER_MODE=bridge is unsafe on MU300/UMS9620 sprd_wlan_combo; use auto or routed"
+        die "TETHER_MODE=bridge is unsafe on MU300/UMS9620 sprd_wlan_combo; use auto, proxyarp, or routed"
     fi
     [ "$(getprop ro.product.cpu.abi 2>/dev/null)" = arm64-v8a ] || \
         die "only arm64-v8a Android hosts are supported"
     [ -c /dev/kvm ] || die "/dev/kvm is unavailable"
     [ -c /dev/net/tun ] || die "/dev/net/tun is unavailable"
+    if [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
+        [ -x "$DHCP_RELAY" ] || die "DHCP relay is missing or not executable: $DHCP_RELAY"
+        [ -w /proc/sys/net/ipv4/conf/all/proxy_arp ] || die "kernel Proxy ARP controls are unavailable"
+        # This branch's safety contract is stronger than merely avoiding the
+        # old connector name: no project-created interface may ever be a port
+        # of a vendor-owned tether bridge on the affected Wi-Fi driver.
+        for bridge_path in /sys/class/net/*/bridge; do
+            [ -e "$bridge_path" ] || continue
+            bridge="${bridge_path%/bridge}"
+            bridge="${bridge##*/}"
+            is_tether_candidate "$bridge" || continue
+            for member_path in "/sys/class/net/$bridge/brif"/*; do
+                [ -e "$member_path" ] || continue
+                member="${member_path##*/}"
+                case "$member" in
+                    owrt-*|owx-*) die "unsafe project port $member is attached to native tether bridge $bridge" ;;
+                esac
+            done
+        done
+    fi
     for command in ip iptables ip6tables truncate stat dumpsys; do
         command -v "$command" >/dev/null 2>&1 || die "required Android command is missing: $command"
     done
