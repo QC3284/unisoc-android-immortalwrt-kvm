@@ -486,6 +486,15 @@ save_direct_br0_state() {
     fi
 }
 
+restart_android_tether_dns() {
+    command -v ndc >/dev/null 2>&1 || return 0
+    ndc tether status 2>/dev/null | grep -q 'Tethering services started' || return 0
+    if ! ndc tether stop >/dev/null 2>&1 || ! ndc tether start >/dev/null 2>&1; then
+        echo "openwrt: warning: could not restart Android tether DNS" >&2
+        return 1
+    fi
+}
+
 sync_direct_br0() {
     save_direct_br0_state
     clear_routed_tethers
@@ -498,13 +507,16 @@ sync_direct_br0() {
     fi
     ip link set dev "$LAN_TAP" up
     ip link set dev "$NATIVE_TETHER_BRIDGE" up
-    # Android's IpServer may restore 192.168.0.1 after an upstream change.
-    # Keep the native bridge itself, its MAC and all vendor ports untouched;
-    # only move its IPv4 management address into OpenWrt's LAN subnet.
-    current_ipv4="$(ip -4 -o addr show dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null | awk '{print $4}')"
-    if [ "$current_ipv4" != "$LAN_HOST_IP/24" ]; then
-        ip -4 addr flush dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null || true
+    # Keep Android IpServer's original address as a secondary address and add
+    # OpenWrt's management address alongside it. Removing Android's address
+    # makes this vendor's dnsmasq 2.51 spin forever while rebuilding listeners.
+    # DHCP suppression still prevents clients from receiving Android's subnet.
+    if ! ip -4 -o addr show dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null | \
+            awk '{print $4}' | grep -Fxq "$LAN_HOST_IP/24"; then
         ip -4 addr add "$LAN_HOST_IP/24" dev "$NATIVE_TETHER_BRIDGE"
+        # dnsmasq 2.51 loops in check_dns_listeners after any address change.
+        # Recreate only netd's tether DNS child once; hotspot/AP state stays up.
+        restart_android_tether_dns || true
     fi
 }
 
@@ -516,6 +528,7 @@ restore_direct_br0() {
             [ -n "$saved_addr" ] && \
                 ip -4 addr add "$saved_addr" dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null || true
         done < "$DIRECT_BR0_ADDR_FILE"
+        restart_android_tether_dns || true
     fi
     rm -f "$DIRECT_BR0_ADDR_FILE"
 }
