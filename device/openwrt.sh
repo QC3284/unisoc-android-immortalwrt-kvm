@@ -62,7 +62,7 @@ load_config() {
     [ -r "$CONFIG" ] || die "missing $CONFIG; run deploy-openwrt.sh first"
     . "$CONFIG"
     : "${ROOT_DEVICE:=/dev/vda}"
-    : "${VM_CPUS:=3}"
+    : "${VM_CPUS:=4}"
     : "${VM_CPU_AFFINITY:=auto}"
     : "${VM_MEMORY_MIB:=1024}"
     : "${AUTO_TAKEOVER:=0}"

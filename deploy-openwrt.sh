@@ -39,7 +39,7 @@ DISK_SIZE="${DISK_SIZE:-8G}"
 # for first-boot package metadata; Android extends it sparsely to DISK_SIZE
 # after upload and OpenWrt grows ext4 online.
 TRANSFER_DISK_SIZE="${TRANSFER_DISK_SIZE:-128M}"
-VM_CPUS="${VM_CPUS:-3}"
+VM_CPUS="${VM_CPUS:-4}"
 VM_CPU_AFFINITY="${VM_CPU_AFFINITY:-auto}"
 VM_MEMORY_MIB="${VM_MEMORY_MIB:-1024}"
 AUTO_TAKEOVER="${AUTO_TAKEOVER:-0}"
