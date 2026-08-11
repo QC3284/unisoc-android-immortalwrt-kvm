@@ -31,7 +31,7 @@ chmod +x deploy-openwrt.sh
 默认密码为 `openwrt`。首次安装时可以覆盖参数：
 
 ```bash
-OPENWRT_PASSWORD='新密码' VM_CPUS=6 VM_MEMORY_MIB=1024 DISK_SIZE=8G \
+OPENWRT_PASSWORD='新密码' VM_CPUS=3 VM_CPU_AFFINITY=auto VM_MEMORY_MIB=1024 DISK_SIZE=8G \
   ./deploy-openwrt.sh install
 ```
 
@@ -39,6 +39,11 @@ OPENWRT_PASSWORD='新密码' VM_CPUS=6 VM_MEMORY_MIB=1024 DISK_SIZE=8G \
 
 ```bash
 DEVICE_MODEL=auto  # 安装时从目标 ADB 设备自动生成；也可手动填写显示名称
+
+VM_CPUS=3              # 默认使用三个 vCPU
+VM_CPU_AFFINITY=auto   # 自动一一绑定到当前 Android 最快的三个在线核心
+# VM_CPU_AFFINITY=none             # 不绑核，交给 Android 调度
+# VM_CPU_AFFINITY='0=4:1=5:2=6'    # 也可以显式指定 guest=host 映射
 
 AUTO_TAKEOVER=0  # Android/SIM/应用直连，只有热点和 USB 客户端走 OpenWrt
 AUTO_TAKEOVER=1  # Android 本机应用流量也由 OpenWrt 接管

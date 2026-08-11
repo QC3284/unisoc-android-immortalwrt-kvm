@@ -39,7 +39,8 @@ DISK_SIZE="${DISK_SIZE:-8G}"
 # for first-boot package metadata; Android extends it sparsely to DISK_SIZE
 # after upload and OpenWrt grows ext4 online.
 TRANSFER_DISK_SIZE="${TRANSFER_DISK_SIZE:-128M}"
-VM_CPUS="${VM_CPUS:-6}"
+VM_CPUS="${VM_CPUS:-3}"
+VM_CPU_AFFINITY="${VM_CPU_AFFINITY:-auto}"
 VM_MEMORY_MIB="${VM_MEMORY_MIB:-1024}"
 AUTO_TAKEOVER="${AUTO_TAKEOVER:-0}"
 IPV6_PASSTHROUGH="${IPV6_PASSTHROUGH:-1}"
@@ -265,6 +266,10 @@ validate_config() {
         die "IPV6_PASSTHROUGH must be 0 or 1"
     [[ "$DEVICE_MODEL" == auto ]] || validate_device_model "$DEVICE_MODEL"
     [[ "$VM_CPUS" =~ ^[1-9][0-9]*$ ]] || die "VM_CPUS must be a positive integer"
+    [[ "$VM_CPU_AFFINITY" == auto || "$VM_CPU_AFFINITY" == none || \
+       "$VM_CPU_AFFINITY" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ || \
+       "$VM_CPU_AFFINITY" =~ ^[0-9]+=[0-9]+(:[0-9]+=[0-9]+)*$ ]] || \
+        die "VM_CPU_AFFINITY must be auto, none, a CPU set, or a guest=host mapping"
     [[ "$VM_MEMORY_MIB" =~ ^[1-9][0-9]*$ ]] || die "VM_MEMORY_MIB must be a positive integer"
     [[ "$CROSVM_PATH" == auto || "$CROSVM_PATH" == bundled || "$CROSVM_PATH" == /* ]] || \
         die "CROSVM_PATH must be auto, bundled, or an absolute device path"
@@ -312,6 +317,7 @@ write_vm_config() {
     cat > "$output" <<EOF
 ROOT_DEVICE='/dev/vda'
 VM_CPUS='$VM_CPUS'
+VM_CPU_AFFINITY='$VM_CPU_AFFINITY'
 VM_MEMORY_MIB='$VM_MEMORY_MIB'
 DISK_SIZE='$DISK_SIZE'
 AUTO_TAKEOVER='$AUTO_TAKEOVER'
@@ -815,9 +821,9 @@ case "${1:-help}" in
     apply-config) apply_config ;;
     show-config)
         validate_config
-        printf 'CONFIG_FILE=%s\nOPENWRT_VERSION=%s\nOPENWRT_TARGET=%s\nDEVICE_MODEL=%s\nDISK_SIZE=%s\nTRANSFER_DISK_SIZE=%s\nVM_CPUS=%s\nVM_MEMORY_MIB=%s\nAUTO_TAKEOVER=%s\nIPV6_PASSTHROUGH=%s\nCROSVM_PATH=%s\nCELLULAR_IFACE=%s\nCELLULAR_ROUTE_TABLE=%s\nTETHER_IFACE_PATTERNS=%s\nTETHER_MODE=%s\nWAN_DNS1=%s\nWAN_DNS2=%s\n' \
+        printf 'CONFIG_FILE=%s\nOPENWRT_VERSION=%s\nOPENWRT_TARGET=%s\nDEVICE_MODEL=%s\nDISK_SIZE=%s\nTRANSFER_DISK_SIZE=%s\nVM_CPUS=%s\nVM_CPU_AFFINITY=%s\nVM_MEMORY_MIB=%s\nAUTO_TAKEOVER=%s\nIPV6_PASSTHROUGH=%s\nCROSVM_PATH=%s\nCELLULAR_IFACE=%s\nCELLULAR_ROUTE_TABLE=%s\nTETHER_IFACE_PATTERNS=%s\nTETHER_MODE=%s\nWAN_DNS1=%s\nWAN_DNS2=%s\n' \
             "$CONFIG_FILE" "$OPENWRT_VERSION" "$OPENWRT_TARGET" "$DEVICE_MODEL" "$DISK_SIZE" \
-            "$TRANSFER_DISK_SIZE" "$VM_CPUS" "$VM_MEMORY_MIB" "$AUTO_TAKEOVER" "$IPV6_PASSTHROUGH" \
+            "$TRANSFER_DISK_SIZE" "$VM_CPUS" "$VM_CPU_AFFINITY" "$VM_MEMORY_MIB" "$AUTO_TAKEOVER" "$IPV6_PASSTHROUGH" \
             "$CROSVM_PATH" "$CELLULAR_IFACE" "$CELLULAR_ROUTE_TABLE" "$TETHER_IFACE_PATTERNS" "$TETHER_MODE" \
             "$WAN_DNS1" "$WAN_DNS2"
         ;;

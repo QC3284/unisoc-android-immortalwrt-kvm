@@ -50,6 +50,7 @@ ROUTED_IFACES_FILE="$VM_DIR/routed-tethers"
 PROXYARP_IFACES_FILE="$VM_DIR/proxyarp-tethers"
 DIRECT_BR0_ADDR_FILE="$VM_DIR/direct-br0.addr"
 EFFECTIVE_TETHER_MODE=""
+EFFECTIVE_CPU_AFFINITY=""
 UNSAFE_NATIVE_BRIDGE=0
 
 die() {
@@ -61,7 +62,8 @@ load_config() {
     [ -r "$CONFIG" ] || die "missing $CONFIG; run deploy-openwrt.sh first"
     . "$CONFIG"
     : "${ROOT_DEVICE:=/dev/vda}"
-    : "${VM_CPUS:=6}"
+    : "${VM_CPUS:=3}"
+    : "${VM_CPU_AFFINITY:=auto}"
     : "${VM_MEMORY_MIB:=1024}"
     : "${AUTO_TAKEOVER:=0}"
     : "${IPV6_PASSTHROUGH:=1}"
@@ -142,6 +144,36 @@ detect_cellular_iface() {
     return 1
 }
 
+resolve_cpu_affinity() {
+    EFFECTIVE_CPU_AFFINITY=""
+    case "$VM_CPU_AFFINITY" in
+        none) return 0 ;;
+        auto)
+            selected_cpus="$(
+                for cpu_path in /sys/devices/system/cpu/cpu[0-9]*; do
+                    cpu_id="${cpu_path##*cpu}"
+                    if [ -r "$cpu_path/online" ] && [ "$(cat "$cpu_path/online" 2>/dev/null)" != 1 ]; then
+                        continue
+                    fi
+                    cpu_score="$(cat "$cpu_path/cpu_capacity" 2>/dev/null)"
+                    [ -n "$cpu_score" ] || cpu_score="$(cat "$cpu_path/cpufreq/cpuinfo_max_freq" 2>/dev/null)"
+                    case "$cpu_score" in *[!0-9]*|'') cpu_score=0 ;; esac
+                    echo "$cpu_score $cpu_id"
+                done | sort -k1,1nr -k2,2n | head -n "$VM_CPUS"
+            )"
+            selected_count="$(printf '%s\n' "$selected_cpus" | sed '/^$/d' | wc -l | tr -d ' ')"
+            [ "$selected_count" = "$VM_CPUS" ] || \
+                die "VM_CPUS=$VM_CPUS exceeds the number of online Android CPUs ($selected_count)"
+            EFFECTIVE_CPU_AFFINITY="$(printf '%s\n' "$selected_cpus" | awk '
+                { if (NR > 1) printf ":"; printf "%d=%s", NR - 1, $2 }
+                END { print "" }
+            ')"
+            ;;
+        *[!0-9,:=-]*|'') die "invalid VM_CPU_AFFINITY: $VM_CPU_AFFINITY" ;;
+        *) EFFECTIVE_CPU_AFFINITY="$VM_CPU_AFFINITY" ;;
+    esac
+}
+
 resolve_device_config() {
     case "$CROSVM_PATH" in
         auto)
@@ -168,6 +200,11 @@ resolve_device_config() {
         CROSVM_STYLE=rwdisk
     else
         die "unsupported crosvm command line: neither --block nor --rwdisk is available"
+    fi
+    resolve_cpu_affinity
+    if [ -n "$EFFECTIVE_CPU_AFFINITY" ] && \
+            ! echo "$crosvm_help" | grep -q -- '--cpu-affinity'; then
+        die "selected crosvm does not support --cpu-affinity"
     fi
 
     if [ "$CELLULAR_IFACE" = auto ]; then
@@ -1102,7 +1139,7 @@ preflight_vm() {
     done
     [ -n "$matched" ] || \
         die "TETHER_IFACE_PATTERNS matches no current interface"
-    echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} mode=$EFFECTIVE_TETHER_MODE ipv6_passthrough=$IPV6_PASSTHROUGH"
+    echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cpus=$VM_CPUS affinity=${EFFECTIVE_CPU_AFFINITY:-none} cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} mode=$EFFECTIVE_TETHER_MODE ipv6_passthrough=$IPV6_PASSTHROUGH"
 }
 
 start_vm() {
@@ -1120,11 +1157,15 @@ start_vm() {
     : > "$LOG"
     : > "$CONSOLE"
     setup_network
+    cpu_affinity_arg=""
+    [ -n "$EFFECTIVE_CPU_AFFINITY" ] && \
+        cpu_affinity_arg="--cpu-affinity=$EFFECTIVE_CPU_AFFINITY"
 
     if [ "$CROSVM_STYLE" = block ]; then
         nohup "$CROSVM" run \
             --disable-sandbox \
             --cpus "$VM_CPUS" \
+            $cpu_affinity_arg \
             --mem "$VM_MEMORY_MIB" \
             --socket "$SOCKET" \
             --serial "type=file,path=$CONSOLE,hardware=serial,num=1,console" \
@@ -1137,6 +1178,7 @@ start_vm() {
         nohup "$CROSVM" run \
             --disable-sandbox \
             --cpus "$VM_CPUS" \
+            $cpu_affinity_arg \
             --mem "$VM_MEMORY_MIB" \
             --socket "$SOCKET" \
             --serial "type=file,path=$CONSOLE,hardware=serial,num=1,console" \
