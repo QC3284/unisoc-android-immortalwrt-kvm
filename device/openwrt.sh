@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# ImmortalWrt Android KVM 设备端管理脚本（由 DeepSeek-V4-Pro 修改：替换为 ImmortalWrt + 国内镜像源）
 set -u
 
 VM_DIR=/data/local/openwrt
@@ -30,8 +31,8 @@ WAN_GUEST_IP=192.168.66.2
 LAN_HOST_IP=192.168.88.2
 LAN_SUBNET=192.168.88.0/24
 LAN_GUEST_IP=192.168.88.1
-# Android's iproute2 has no rt_tables file, so custom tables must be numeric.
-# 1000 is unused by the framework (it uses 97-99 and 100+ per-network tables).
+# Android 的 iproute2 没有 rt_tables 文件，因此自定义表必须是数字。
+# 1000 未被框架使用（它使用 97-99 和 100+ 的按网络表）。
 OWRT_TABLE=1000
 RULE_PRIO=100
 ROUTED_TETHER_RULE_PRIO=1053
@@ -40,9 +41,9 @@ IPV6_OUT_RULE_PRIO=1051
 IPV6_IN_RULE_PRIO=1052
 IPV6_BLOCK_PRIO=100
 IPV6_FORWARD_CHAIN=OWT6_VM
-# Android's policy routing ends with "from all unreachable"; without an
-# explicit rule, packets from the Android host itself to the OpenWrt subnets
-# are dropped before reaching the taps. Point them at the main table.
+# Android 的策略路由以 "from all unreachable" 结尾；如果没有显式规则，
+# 从 Android 宿主机自身发往 ImmortalWrt 子网的数据包在到达 tap 之前就会被丢弃。
+# 将它们指向主路由表。
 HOST_ROUTE_PRIO=1049
 SSH_DNAT_PORT=2223
 WEB_DNAT_PORT=8080
@@ -62,7 +63,7 @@ die() {
 }
 
 load_config() {
-    [ -r "$CONFIG" ] || die "missing $CONFIG; run deploy-openwrt.sh first"
+    [ -r "$CONFIG" ] || die "缺少 $CONFIG；请先运行 deploy-openwrt.sh"
     . "$CONFIG"
     : "${ROOT_DEVICE:=/dev/vda}"
     : "${VM_CPUS:=4}"
@@ -78,11 +79,11 @@ load_config() {
     : "${TETHER_MODE:=auto}"
     case "$IPV6_PASSTHROUGH" in
         0|1) ;;
-        *) die "IPV6_PASSTHROUGH must be 0 or 1" ;;
+        *) die "IPV6_PASSTHROUGH 必须为 0 或 1" ;;
     esac
     case "$TETHER_MODE" in
         auto|bridge|routed|proxyarp|directbr0) ;;
-        *) die "TETHER_MODE must be auto, bridge, routed, proxyarp, or directbr0" ;;
+        *) die "TETHER_MODE 必须为 auto、bridge、routed、proxyarp 或 directbr0" ;;
     esac
 }
 
@@ -101,8 +102,8 @@ resolve_tether_mode() {
     case "$TETHER_MODE" in
         bridge|routed|proxyarp|directbr0) EFFECTIVE_TETHER_MODE="$TETHER_MODE" ;;
         auto)
-            # UMS9620's Android 13 sprd_wlan_combo driver corrupts an skb when
-            # its native hotspot bridge is extended with another Linux bridge.
+            # UMS9620 的 Android 13 sprd_wlan_combo 驱动在其原生热点桥被扩展
+            # 另一个 Linux 网桥时会损坏 skb。
             if [ "$UNSAFE_NATIVE_BRIDGE" = 1 ]; then
                 EFFECTIVE_TETHER_MODE=proxyarp
             else
@@ -169,14 +170,13 @@ resolve_cpu_affinity() {
             )"
             selected_count="$(printf '%s\n' "$selected_cpus" | sed '/^$/d' | wc -l | tr -d ' ')"
             [ "$selected_count" = "$VM_CPUS" ] || \
-                die "VM_CPUS=$VM_CPUS exceeds the number of online Android CPUs ($selected_count)"
+                die "VM_CPUS=$VM_CPUS 超过了在线 Android CPU 数量 ($selected_count)"
             EFFECTIVE_CPU_AFFINITY="$(printf '%s\n' "$selected_cpus" | awk '
                 { if (NR > 1) printf ":"; printf "%d=%s", NR - 1, $2 }
                 END { print "" }
             ')"
-            # Tell the guest scheduler that a vCPU pinned to a little core is
-            # not equivalent to one pinned to a big core. Normalize either
-            # cpu_capacity or the cpufreq fallback to crosvm's 1024 scale.
+            # 告知客户机调度器：绑定到小核的 vCPU 与绑定到大核的不等价。
+            # 将 cpu_capacity 或 cpufreq 回退值归一化到 crosvm 的 1024 刻度。
             EFFECTIVE_CPU_CAPACITY="$(printf '%s\n' "$selected_cpus" | awk '
                 NR == 1 { max = $1 }
                 {
@@ -187,8 +187,8 @@ resolve_cpu_affinity() {
                 }
                 END { print "" }
             ')"
-            # selected_cpus is capacity-sorted, so equal-capacity vCPUs are
-            # contiguous and can be represented as crosvm CPU clusters.
+            # selected_cpus 已按 capacity 排序，因此等 capacity 的 vCPU 是连续的，
+            # 可以表示为 crosvm CPU 簇。
             EFFECTIVE_CPU_CLUSTERS="$(printf '%s\n' "$selected_cpus" | awk '
                 function emit(first, last) {
                     if (output != "") output = output " "
@@ -199,7 +199,7 @@ resolve_cpu_affinity() {
                 END { if (NR > 0) emit(first, NR - 1); print output }
             ')"
             ;;
-        *[!0-9,:=-]*|'') die "invalid VM_CPU_AFFINITY: $VM_CPU_AFFINITY" ;;
+        *[!0-9,:=-]*|'') die "无效的 VM_CPU_AFFINITY: $VM_CPU_AFFINITY" ;;
         *) EFFECTIVE_CPU_AFFINITY="$VM_CPU_AFFINITY" ;;
     esac
 }
@@ -213,15 +213,15 @@ resolve_net_queues() {
                 EFFECTIVE_NET_QUEUES=1
             fi
             ;;
-        *[!0-9]*|'') die "VM_NET_QUEUES must be auto or a positive integer" ;;
-        0) die "VM_NET_QUEUES must be positive" ;;
+        *[!0-9]*|'') die "VM_NET_QUEUES 必须为 auto 或正整数" ;;
+        0) die "VM_NET_QUEUES 必须为正数" ;;
         *)
             [ "$VM_NET_QUEUES" -le "$VM_CPUS" ] || \
-                die "VM_NET_QUEUES cannot exceed VM_CPUS"
+                die "VM_NET_QUEUES 不能超过 VM_CPUS"
             EFFECTIVE_NET_QUEUES="$VM_NET_QUEUES"
             if [ "$EFFECTIVE_NET_QUEUES" -gt 1 ] && \
                     ! echo "$crosvm_help" | grep -q -- '--net-vq-pairs'; then
-                die "selected crosvm does not support --net-vq-pairs"
+                die "所选 crosvm 不支持 --net-vq-pairs"
             fi
             ;;
     esac
@@ -242,9 +242,9 @@ resolve_device_config() {
             ;;
         bundled) CROSVM="$BUNDLED_CROSVM" ;;
         /*) CROSVM="$CROSVM_PATH" ;;
-        *) die "CROSVM_PATH must be auto, bundled, or an absolute device path" ;;
+        *) die "CROSVM_PATH 必须为 auto、bundled 或设备上的绝对路径" ;;
     esac
-    [ -x "$CROSVM" ] || die "crosvm is not executable: $CROSVM"
+    [ -x "$CROSVM" ] || die "crosvm 不可执行: $CROSVM"
 
     crosvm_help="$("$CROSVM" run --help 2>&1)"
     if echo "$crosvm_help" | grep -q -- '--block'; then
@@ -252,29 +252,29 @@ resolve_device_config() {
     elif echo "$crosvm_help" | grep -q -- '--rwdisk'; then
         CROSVM_STYLE=rwdisk
     else
-        die "unsupported crosvm command line: neither --block nor --rwdisk is available"
+        die "不支持的 crosvm 命令行: --block 和 --rwdisk 均不可用"
     fi
     resolve_cpu_affinity
     resolve_net_queues
     if [ -n "$EFFECTIVE_CPU_AFFINITY" ] && \
             ! echo "$crosvm_help" | grep -q -- '--cpu-affinity'; then
-        die "selected crosvm does not support --cpu-affinity"
+        die "所选 crosvm 不支持 --cpu-affinity"
     fi
     if [ -n "$EFFECTIVE_CPU_CAPACITY" ] && \
             ! echo "$crosvm_help" | grep -q -- '--cpu-capacity'; then
-        die "selected crosvm does not support --cpu-capacity"
+        die "所选 crosvm 不支持 --cpu-capacity"
     fi
     if [ -n "$EFFECTIVE_CPU_CLUSTERS" ] && \
             ! echo "$crosvm_help" | grep -q -- '--cpu-cluster'; then
-        die "selected crosvm does not support --cpu-cluster"
+        die "所选 crosvm 不支持 --cpu-cluster"
     fi
 
     if [ "$CELLULAR_IFACE" = auto ]; then
         CELLULAR_IFACE="$(detect_cellular_iface)" || \
-            die "cannot detect cellular interface; set CELLULAR_IFACE in config.env"
+            die "无法检测蜂窝接口；请在 config.env 中设置 CELLULAR_IFACE"
     fi
     [ -e "/sys/class/net/$CELLULAR_IFACE" ] || \
-        die "cellular interface does not exist: $CELLULAR_IFACE"
+        die "蜂窝接口不存在: $CELLULAR_IFACE"
     [ "$CELLULAR_ROUTE_TABLE" = auto ] && CELLULAR_ROUTE_TABLE="$CELLULAR_IFACE"
     resolve_tether_mode
 }
@@ -297,9 +297,9 @@ is_tether_candidate() {
     matches_tether_pattern "$iface" && is_tethered "$iface"
 }
 
-# Potential downstreams must be protected before Android reports TetheredState.
-# Otherwise IpServer can leak its first .0.x/42.x DHCP offer during USB gadget
-# recreation, before the network monitor has attached the interface to OpenWrt.
+# 潜在的下游接口必须在 Android 报告 TetheredState 之前受到保护。
+# 否则 IpServer 可能在 USB  gadget 重建期间泄露其首个 .0.x/42.x DHCP 提供，
+# 而此时网络监视器尚未将该接口附加到 ImmortalWrt。
 is_tether_capable() {
     iface="$1"
     if [ "$TETHER_IFACE_PATTERNS" != auto ]; then
@@ -387,9 +387,9 @@ bridge_attach() {
         ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' > "$VM_DIR/bridge-$iface.addr"
         ip link set dev "$iface" master "$LAN_BRIDGE"
     fi
-    # Android's IpServer may re-add its 42-49.x IPv4 address after an upstream
-    # change. Keep IPv4 DHCP/routing on OpenWrt, but retain Android's global
-    # IPv6 address so its cellular RA and IPv6 forwarding continue to work.
+    # Android 的 IpServer 可能在上游变化后重新添加其 42-49.x IPv4 地址。
+    # 保持 IPv4 DHCP/路由在 ImmortalWrt 上，但保留 Android 的全局 IPv6 地址，
+    # 使其蜂窝 RA 和 IPv6 转发继续工作。
     ip -4 addr flush dev "$iface" 2>/dev/null || true
     ip link set dev "$iface" up
 }
@@ -540,8 +540,8 @@ sync_proxyarp_tethers() {
             cat "/proc/sys/net/ipv4/conf/$iface/proxy_arp" > "$saved"
         fi
         echo 1 > "/proc/sys/net/ipv4/conf/$iface/proxy_arp"
-        # The /32 keeps OpenWrt itself on owrt-br; the less-specific route
-        # sends all leased clients back to the untouched Android tether port.
+        # /32 将 ImmortalWrt 自身保持在 owrt-br 上；较不具体的路由
+        # 将所有租用客户端发送回未修改的 Android 热点端口。
         ip route replace "$LAN_SUBNET" dev "$iface" metric 42700
         ip -4 rule add priority "$ROUTED_TETHER_RULE_PRIO" iif "$iface" lookup "$OWRT_TABLE"
         ensure_dhcp_relay "$iface"
@@ -565,8 +565,8 @@ sync_routed_tethers() {
     printf '%s' "$desired" | while read -r iface; do
         [ -n "$iface" ] || continue
         ip -4 rule add priority "$ROUTED_TETHER_RULE_PRIO" iif "$iface" lookup "$OWRT_TABLE"
-        # Android advertises itself as DNS. Send client DNS to OpenWrt so its
-        # dnsmasq/PassWall policy is still applied in routed fallback mode.
+        # Android 将自身通告为 DNS。将客户端 DNS 发送到 ImmortalWrt，
+        # 使其 dnsmasq/PassWall 策略在路由回退模式下仍然生效。
         iptables -t nat -A OWT_RPRE -i "$iface" -p udp --dport 53 \
             -j DNAT --to-destination "$LAN_GUEST_IP:53"
         iptables -t nat -A OWT_RPRE -i "$iface" -p tcp --dport 53 \
@@ -578,7 +578,7 @@ sync_routed_tethers() {
 
 save_direct_br0_state() {
     [ -d "/sys/class/net/$NATIVE_TETHER_BRIDGE/bridge" ] || \
-        die "native tether bridge does not exist: $NATIVE_TETHER_BRIDGE"
+        die "原生热点桥不存在: $NATIVE_TETHER_BRIDGE"
     if [ ! -r "$DIRECT_BR0_ADDR_FILE" ]; then
         ip -4 -o addr show dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null | \
             awk '{print $4}' > "$DIRECT_BR0_ADDR_FILE"
@@ -589,7 +589,7 @@ restart_android_tether_dns() {
     command -v ndc >/dev/null 2>&1 || return 0
     ndc tether status 2>/dev/null | grep -q 'Tethering services started' || return 0
     if ! ndc tether stop >/dev/null 2>&1 || ! ndc tether start >/dev/null 2>&1; then
-        echo "openwrt: warning: could not restart Android tether DNS" >&2
+        echo "openwrt: 警告: 无法重启 Android 热点 DNS" >&2
         return 1
     fi
 }
@@ -606,15 +606,14 @@ sync_direct_br0() {
     fi
     ip link set dev "$LAN_TAP" up
     ip link set dev "$NATIVE_TETHER_BRIDGE" up
-    # Keep Android IpServer's original address as a secondary address and add
-    # OpenWrt's management address alongside it. Removing Android's address
-    # makes this vendor's dnsmasq 2.51 spin forever while rebuilding listeners.
-    # DHCP suppression still prevents clients from receiving Android's subnet.
+    # 将 Android IpServer 的原始地址保留为辅助地址，并添加 ImmortalWrt 的
+    # 管理地址。移除 Android 地址会使此厂商的 dnsmasq 2.51 在重建监听器时
+    # 无限循环。DHCP 抑制仍然阻止客户端接收 Android 的子网。
     if ! ip -4 -o addr show dev "$NATIVE_TETHER_BRIDGE" 2>/dev/null | \
             awk '{print $4}' | grep -Fxq "$LAN_HOST_IP/24"; then
         ip -4 addr add "$LAN_HOST_IP/24" dev "$NATIVE_TETHER_BRIDGE"
-        # dnsmasq 2.51 loops in check_dns_listeners after any address change.
-        # Recreate only netd's tether DNS child once; hotspot/AP state stays up.
+        # dnsmasq 2.51 在任何地址变更后于 check_dns_listeners 中无限循环。
+        # 仅重建 netd 的热点 DNS 子进程；热点/AP 状态保持不变。
         restart_android_tether_dns || true
     fi
 }
@@ -659,9 +658,8 @@ stop_ra6_port() {
         if [ -n "$ra_pid" ] && [ -r "/proc/$ra_pid/cmdline" ] && \
                 tr '\000' ' ' < "/proc/$ra_pid/cmdline" | grep -q "$RA6"; then
             kill "$ra_pid" 2>/dev/null || true
-            # ra6 sends withdrawal advertisements on SIGTERM. Wait for those
-            # frames before a replacement announces a new prefix, otherwise
-            # a late withdrawal could invalidate the new default route.
+            # ra6 在 SIGTERM 时发送撤销通告。在替换程序通告新前缀之前
+            # 等待这些帧，否则延迟的撤销可能使新的默认路由失效。
             wait_count=0
             while [ "$wait_count" -lt 20 ] && [ -e "/proc/$ra_pid" ]; do
                 sleep 0.1
@@ -701,16 +699,15 @@ ensure_ra6_port() {
         [ -n "$ra_pid" ] && [ -d "/proc/$ra_pid" ] && return 0
     fi
     stop_ra6_port "$iface"
-    # Advertise the bridge itself as the preferred router. Android may also
-    # publish its physical-port router as a medium-preference fallback.
+    # 将网桥自身通告为首选路由器。Android 也可能将其物理端口路由器
+    # 作为中等优先级回退发布。
     nohup "$RA6" "$iface" "$router_iface" "$prefix" \
         </dev/null >"$VM_DIR/ra6-$iface.log" 2>&1 &
     echo "$!" > "$pidfile"
 }
 
 sync_ipv6_passthrough() {
-    # Android owns downstream IPv6 in this mode; do not suppress its native
-    # tethering RA/DHCPv6 packets.
+    # 此模式下 Android 拥有下游 IPv6；不抑制其原生热点 RA/DHCPv6 数据包。
     delete_ip6_jump_and_chain OUTPUT OWT6_OUT
     [ -x "$RA6" ] || return 0
     prefix="$(cellular_ipv6_prefix)"
@@ -787,10 +784,9 @@ withdraw_native_ipv6_ra() {
     for path in /sys/class/net/*; do
         iface="${path##*/}"
         is_tether_candidate "$iface" || continue
-        # Send one advertisement followed immediately by the helper's normal
-        # zero-lifetime withdrawal, using Android's own interface link-local.
-        # This removes routes/addresses cached before the managed-mode filter
-        # was installed, so clients do not need to reconnect manually.
+        # 发送一个通告，紧随其后的是辅助程序的正常零生命周期撤销，
+        # 使用 Android 自身的接口链路本地地址。这移除了在托管模式过滤器
+        # 安装之前缓存的路由和地址，因此客户端不需要手动重新连接。
         "$RA6" "$iface" "$iface" "$prefix" \
             >"$VM_DIR/withdraw-$iface.log" 2>&1 &
         withdraw_pid=$!
@@ -812,9 +808,9 @@ sync_ipv6_managed() {
     current_prefix="$(cat "$IPV6_PREFIX_FILE" 2>/dev/null)"
     if [ "$current_prefix" != "$prefix" ]; then
         stop_ipv6_downstream
-        # OpenWrt learns a public WAN address and default route from this RA.
-        # Its own firewall performs NAT66 from the managed LAN ULA. Android
-        # only routes that public WAN address to the cellular network.
+        # ImmortalWrt 从此 RA 学习公网 WAN 地址和默认路由。
+        # 其自身防火墙从托管 LAN ULA 执行 NAT66。Android 仅将该公网
+        # WAN 地址路由到蜂窝网络。
         ip -6 addr replace fe80::1/64 dev "$WAN_TAP"
         ip -6 route replace "$prefix/64" dev "$WAN_TAP" metric 64 table main
         ip -6 rule add priority "$IPV6_OUT_RULE_PRIO" iif "$WAN_TAP" lookup "$CELLULAR_ROUTE_TABLE"
@@ -848,9 +844,9 @@ sync_routed_ipv6_policy() {
 }
 
 sync_ipv6_downstream() {
-    # The safe routed/proxy-ARP modes cannot advertise OpenWrt's LAN prefix
-    # without extending br0. Honour the switch by passing Android IPv6 at 1
-    # and blocking downstream IPv6 at 0 so it cannot silently bypass OpenWrt.
+    # 安全的路由/Proxy-ARP 模式无法在不扩展 br0 的情况下通告 ImmortalWrt 的
+    # LAN 前缀。当设为 1 时传递 Android IPv6 以遵守开关，当设为 0 时阻止
+    # 下游 IPv6 使其无法静默绕过 ImmortalWrt。
     if [ "$EFFECTIVE_TETHER_MODE" = routed ] || [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
         sync_routed_ipv6_policy
         return 0
@@ -867,7 +863,7 @@ refresh_ipv6() {
     resolve_device_config
     stop_ipv6_downstream
     is_running && sync_ipv6_downstream
-    echo "IPv6 fallback RA refreshed"
+    echo "IPv6 回退 RA 已刷新"
 }
 
 detach_bridge_ports() {
@@ -883,13 +879,13 @@ detach_bridge_ports() {
     done
 }
 
-# Android keeps default routes in per-network tables, not in the main table.
-# Route packets arriving from OpenWrt's WAN out through whichever table has the
-# active IPv4 default, so NAT mode works on WiFi, USB or cellular upstream.
+# Android 将默认路由保留在按网络的表中，而非主表中。
+# 将从 ImmortalWrt WAN 到达的数据包通过具有活跃 IPv4 默认路由的任何表路由出去，
+# 使 NAT 模式在 Wi-Fi、USB 或蜂窝上行链路上均能工作。
 sync_upstream() {
-    # Android keeps the active Wi-Fi/cellular default in a named table. Wi-Fi
-    # uses "default via ...", while this Unisoc cellular driver uses
-    # "default dev ...", so accept both and ignore dummy/VM tables.
+    # Android 将活跃的 Wi-Fi/蜂窝默认路由保留在命名表中。Wi-Fi 使用
+    # "default via ..."，而此 Unisoc 蜂窝驱动使用 "default dev ..."，
+    # 因此两者都接受并忽略虚拟/VM 表。
     upstream="$(ip -4 route show table all 2>/dev/null | awk -v owrt_table="$OWRT_TABLE" '
         /^default / {
             table = ""
@@ -920,8 +916,8 @@ sync_dhcp_block() {
     iptables -F OWT_OUT
     iptables -A OWT_OUT -o "$LAN_BRIDGE" -p udp --sport 67 --dport 68 -j DROP
     if [ "$TETHER_IFACE_PATTERNS" = auto ]; then
-        # A trailing '+' is iptables' interface-prefix wildcard and remains
-        # effective even while gadget reconfiguration removes the netdev.
+        # 尾随的 '+' 是 iptables 的接口前缀通配符，即使
+        # gadget 重新配置移除网卡时仍然有效。
         for iface_prefix in sipa_usb+ rndis+ wlan+ softap+ ap_br_wlan+ ap_br_softap+; do
             iptables -A OWT_OUT -o "$iface_prefix" -p udp --sport 67 --dport 68 -j DROP
         done
@@ -944,7 +940,7 @@ sync_dhcp_block() {
 
 setup_network() {
     echo "$EFFECTIVE_TETHER_MODE" > "$ACTIVE_MODE_FILE"
-    # Install the DHCP guard before TAP/bridge changes close the lifecycle race.
+    # 在 TAP/网桥更改关闭生命周期竞争之前安装 DHCP 防护。
     sync_dhcp_block
     for tap in "$WAN_TAP" "$LAN_TAP"; do
         ip link set dev "$tap" nomaster 2>/dev/null || true
@@ -952,11 +948,11 @@ setup_network() {
         if [ "$EFFECTIVE_NET_QUEUES" -gt 1 ]; then
             if ! ip tuntap add dev "$tap" mode tap multi_queue 2>/dev/null; then
                 if [ "$VM_NET_QUEUES" = auto ]; then
-                    echo "openwrt: multiqueue TAP unavailable; falling back to one queue" >&2
+                    echo "openwrt: 多队列 TAP 不可用；回退到单队列" >&2
                     EFFECTIVE_NET_QUEUES=1
                     ip tuntap add dev "$tap" mode tap
                 else
-                    die "cannot create multiqueue TAP $tap"
+                    die "无法创建多队列 TAP $tap"
                 fi
             fi
         else
@@ -989,14 +985,14 @@ setup_network() {
     fi
     sync_ipv6_downstream
 
-    # Let the Android host itself reach the OpenWrt subnets (default policy
-    # routing would otherwise drop these via the trailing "unreachable" rule).
+    # 让 Android 宿主机自身能够访问 ImmortalWrt 子网（默认策略路由
+    # 否则会通过尾随的 "unreachable" 规则丢弃这些数据包）。
     ip rule del priority "$HOST_ROUTE_PRIO" to "$WAN_SUBNET" lookup main 2>/dev/null || true
     ip rule del priority "$HOST_ROUTE_PRIO" to "$LAN_SUBNET" lookup main 2>/dev/null || true
     ip rule add priority "$HOST_ROUTE_PRIO" to "$WAN_SUBNET" lookup main
     ip rule add priority "$HOST_ROUTE_PRIO" to "$LAN_SUBNET" lookup main
 
-    # Send OpenWrt's WAN traffic out the device's active upstream.
+    # 将 ImmortalWrt 的 WAN 流量通过设备的活跃上行链路发送出去。
     sync_upstream
 
     if [ ! -f "$VM_DIR/ip_forward.original" ]; then
@@ -1017,23 +1013,22 @@ setup_network() {
     iptables -t nat -N OWT_POST 2>/dev/null || true
     iptables -t nat -F OWT_POST
     iptables -t nat -A OWT_POST -s "$WAN_SUBNET" -j MASQUERADE
-    # DNAT reply path: rewrite the source to the host LAN IP so the guest
-    # sees a LAN-originated connection and replies symmetrically via br-lan.
-    # Without this the guest routes replies out its WAN (default route) and
-    # the host never completes the handshake.
-    # All traffic routed into OpenWrt's LAN is represented by the Android-side
-    # LAN address. This gives Android apps and tethered clients a symmetric
-    # return path through conntrack, including apps bound to Wi-Fi/cellular.
+    # DNAT 回复路径：将源地址重写为宿主机 LAN IP，使客户机将其视为
+    # LAN 发起的连接并通过 br-lan 对称回复。没有此规则，客户机会通过
+    # WAN（默认路由）路由回复，宿主机永远无法完成握手。
+    # 所有路由进入 ImmortalWrt LAN 的流量都以 Android 侧 LAN 地址表示。
+    # 这为 Android 应用和热点客户端提供了通过 conntrack 的对称返回路径，
+    # 包括绑定到 Wi-Fi/蜂窝的应用。
     iptables -t nat -A OWT_POST ! -s "$LAN_SUBNET" -o "$LAN_BRIDGE" -j SNAT --to-source "$LAN_HOST_IP"
     ensure_jump nat POSTROUTING OWT_POST
 
     iptables -t nat -N OWT_PRE 2>/dev/null || true
     iptables -t nat -F OWT_PRE
-    # External SSH (host 2223 -> OpenWrt LAN 88.1:22) and LuCI web
-    # (host 8080 -> 88.1:80). The LAN side is used so OpenWrt default
-    # firewall (lan input ACCEPT) applies; OWT_POST rewrites the source to
-    # 88.2 so replies come back through br-lan. legacy iptables rejects
-    # multiple -i flags in one rule, so skip the taps with RETURN first.
+    # 外部 SSH（宿主机 2223 -> ImmortalWrt LAN 88.1:22）和 LuCI Web
+    # （宿主机 8080 -> 88.1:80）。使用 LAN 侧使 ImmortalWrt 默认防火墙
+    # （lan input ACCEPT）生效；OWT_POST 将源地址重写为 88.2，
+    # 使回复通过 br-lan 返回。旧版 iptables 拒绝在一条规则中使用
+    # 多个 -i 标志，因此先用 RETURN 跳过 tap。
     iptables -t nat -A OWT_PRE -p tcp -i "$WAN_TAP" -j RETURN
     iptables -t nat -A OWT_PRE -p tcp -i "$LAN_TAP" -j RETURN
     iptables -t nat -A OWT_PRE -p tcp --dport "$SSH_DNAT_PORT" \
@@ -1042,9 +1037,9 @@ setup_network() {
         -j DNAT --to-destination "$LAN_GUEST_IP:80"
     ensure_jump nat PREROUTING OWT_PRE
 
-    # Android owns AP/RNDIS lifecycle. Bridge mode moves DHCP/RA to OpenWrt;
-    # Routed fallback retains Android DHCP. Proxy-ARP and bridge modes suppress
-    # Android DHCP so OpenWrt is the only server clients can hear.
+    # Android 拥有 AP/RNDIS 生命周期。网桥模式将 DHCP/RA 移至 ImmortalWrt；
+    # 路由回退模式保留 Android DHCP。Proxy-ARP 和网桥模式抑制 Android DHCP，
+    # 使 ImmortalWrt 成为客户端唯一能听到的服务器。
     sync_dhcp_block
 
 }
@@ -1079,10 +1074,10 @@ teardown_network() {
     rm -f "$ACTIVE_MODE_FILE"
 }
 
-# Steer Android's own locally generated traffic through OpenWrt. Tethered
-# clients use either a real Layer-2 bridge or their mode-specific ingress rule.
+# 将 Android 自身本地生成的流量引导至 ImmortalWrt。热点客户端
+# 使用真正的二层网桥或其模式特定的入口规则。
 takeover() {
-    ip link show "$LAN_TAP" >/dev/null 2>&1 || die "run start first"
+    ip link show "$LAN_TAP" >/dev/null 2>&1 || die "请先运行 start"
 
     ip route flush table "$OWRT_TABLE" 2>/dev/null || true
     ensure_owrt_routes
@@ -1090,9 +1085,9 @@ takeover() {
     while ip -4 rule del priority "$RULE_PRIO" 2>/dev/null; do :; done
     ip rule add priority "$RULE_PRIO" iif lo lookup "$OWRT_TABLE"
 
-    # OpenWrt takeover currently covers Android's local IPv4 only. Reject the
-    # Android host's own IPv6 while takeover is active; bridged hotspot/USB
-    # clients keep using Android's cellular IPv6 service.
+    # ImmortalWrt 接管目前仅覆盖 Android 本地 IPv4。在接管活跃时拒绝
+    # Android 宿主机自身的 IPv6；桥接的热点/USB 客户端继续使用
+    # Android 的蜂窝 IPv6 服务。
     while ip -6 rule del priority "$IPV6_BLOCK_PRIO" 2>/dev/null; do :; done
     ip -6 rule add priority "$IPV6_BLOCK_PRIO" iif lo prohibit
     delete_ip6_jump_and_chain FORWARD OWT6_FWD
@@ -1100,7 +1095,7 @@ takeover() {
     touch "$TAKEOVER_FLAG"
     sync_upstream
     start_monitor
-    echo "OpenWrt takeover enabled (Android apps routed; tether mode $EFFECTIVE_TETHER_MODE)"
+    echo "ImmortalWrt 接管已启用（Android 应用已路由；热点模式 $EFFECTIVE_TETHER_MODE）"
 }
 
 untakeover() {
@@ -1113,7 +1108,7 @@ untakeover() {
         ip route flush table "$OWRT_TABLE" 2>/dev/null || true
     fi
     delete_ip6_jump_and_chain FORWARD OWT6_FWD
-    echo "OpenWrt takeover disabled"
+    echo "ImmortalWrt 接管已禁用"
 }
 
 network_monitor() {
@@ -1124,8 +1119,8 @@ network_monitor() {
         sync_tether_network
         sync_ipv6_downstream
         sync_dhcp_block
-        # Guest WAN forwarding must follow Wi-Fi/cellular changes regardless
-        # of whether Android's own locally generated traffic is taken over.
+        # 客户机 WAN 转发必须跟随 Wi-Fi/蜂窝变化，
+        # 无论 Android 自身本地生成的流量是否被接管。
         sync_upstream
         sleep 3
     done
@@ -1152,29 +1147,28 @@ preflight_vm() {
     load_config
     resolve_device_config
     if [ "$UNSAFE_NATIVE_BRIDGE" = 1 ] && [ "$EFFECTIVE_TETHER_MODE" = bridge ]; then
-        die "TETHER_MODE=bridge is unsafe on MU300/UMS9620 sprd_wlan_combo; use auto, proxyarp, or routed"
+        die "TETHER_MODE=bridge 在 MU300/UMS9620 sprd_wlan_combo 上不安全；请使用 auto、proxyarp 或 routed"
     fi
     if [ "$EFFECTIVE_TETHER_MODE" = directbr0 ]; then
         [ -d "/sys/class/net/$NATIVE_TETHER_BRIDGE/bridge" ] || \
-            die "TETHER_MODE=directbr0 requires native bridge $NATIVE_TETHER_BRIDGE"
+            die "TETHER_MODE=directbr0 需要原生网桥 $NATIVE_TETHER_BRIDGE"
         for member_path in "/sys/class/net/$NATIVE_TETHER_BRIDGE/brif"/owrt-* \
                 "/sys/class/net/$NATIVE_TETHER_BRIDGE/brif"/owx-*; do
             [ -e "$member_path" ] || continue
             member="${member_path##*/}"
             [ "$member" = "$LAN_TAP" ] || \
-                die "directbr0 refuses unexpected project port $member on $NATIVE_TETHER_BRIDGE"
+                die "directbr0 拒绝 $NATIVE_TETHER_BRIDGE 上意外的项目端口 $member"
         done
     fi
     [ "$(getprop ro.product.cpu.abi 2>/dev/null)" = arm64-v8a ] || \
-        die "only arm64-v8a Android hosts are supported"
-    [ -c /dev/kvm ] || die "/dev/kvm is unavailable"
-    [ -c /dev/net/tun ] || die "/dev/net/tun is unavailable"
+        die "仅支持 arm64-v8a Android 宿主机"
+    [ -c /dev/kvm ] || die "/dev/kvm 不可用"
+    [ -c /dev/net/tun ] || die "/dev/net/tun 不可用"
     if [ "$EFFECTIVE_TETHER_MODE" = proxyarp ]; then
-        [ -x "$DHCP_RELAY" ] || die "DHCP relay is missing or not executable: $DHCP_RELAY"
-        [ -w /proc/sys/net/ipv4/conf/all/proxy_arp ] || die "kernel Proxy ARP controls are unavailable"
-        # This branch's safety contract is stronger than merely avoiding the
-        # old connector name: no project-created interface may ever be a port
-        # of a vendor-owned tether bridge on the affected Wi-Fi driver.
+        [ -x "$DHCP_RELAY" ] || die "DHCP 中继缺失或不可执行: $DHCP_RELAY"
+        [ -w /proc/sys/net/ipv4/conf/all/proxy_arp ] || die "内核 Proxy ARP 控制不可用"
+        # 此分支的安全契约比仅仅避免旧连接器名称更强：任何项目创建的接口
+        # 都不能成为受影响 Wi-Fi 驱动上厂商拥有的热点桥的端口。
         for bridge_path in /sys/class/net/*/bridge; do
             [ -e "$bridge_path" ] || continue
             bridge="${bridge_path%/bridge}"
@@ -1184,16 +1178,16 @@ preflight_vm() {
                 [ -e "$member_path" ] || continue
                 member="${member_path##*/}"
                 case "$member" in
-                    owrt-*|owx-*) die "unsafe project port $member is attached to native tether bridge $bridge" ;;
+                    owrt-*|owx-*) die "不安全的项目端口 $member 已附加到原生热点桥 $bridge" ;;
                 esac
             done
         done
     fi
     for command in ip iptables ip6tables truncate stat dumpsys; do
-        command -v "$command" >/dev/null 2>&1 || die "required Android command is missing: $command"
+        command -v "$command" >/dev/null 2>&1 || die "缺少必需的 Android 命令: $command"
     done
     if [ -x "$KVM_PROBE" ]; then
-        "$KVM_PROBE" >/dev/null || die "KVM/vGIC capability probe failed"
+        "$KVM_PROBE" >/dev/null || die "KVM/vGIC 能力探测失败"
     fi
 
     probe_tap=owrt-check0
@@ -1205,17 +1199,17 @@ preflight_vm() {
             if [ "$VM_NET_QUEUES" = auto ]; then
                 EFFECTIVE_NET_QUEUES=1
                 ip tuntap add dev "$probe_tap" mode tap || \
-                    die "kernel cannot create TAP interfaces"
+                    die "内核无法创建 TAP 接口"
             else
-                die "kernel cannot create multiqueue TAP interfaces"
+                die "内核无法创建多队列 TAP 接口"
             fi
         fi
     else
-        ip tuntap add dev "$probe_tap" mode tap || die "kernel cannot create TAP interfaces"
+        ip tuntap add dev "$probe_tap" mode tap || die "内核无法创建 TAP 接口"
     fi
     ip link add name "$probe_bridge" type bridge || {
         ip link delete "$probe_tap" 2>/dev/null || true
-        die "kernel cannot create Linux bridges"
+        die "内核无法创建 Linux 网桥"
     }
     ip link delete "$probe_tap" 2>/dev/null || true
     ip link delete "$probe_bridge" type bridge 2>/dev/null || true
@@ -1226,7 +1220,7 @@ preflight_vm() {
         matches_tether_pattern "$iface" && matched="$matched $iface"
     done
     [ -n "$matched" ] || \
-        die "TETHER_IFACE_PATTERNS matches no current interface"
+        die "TETHER_IFACE_PATTERNS 未匹配到任何当前接口"
     echo "preflight ok: crosvm=$CROSVM style=$CROSVM_STYLE cpus=$VM_CPUS affinity=${EFFECTIVE_CPU_AFFINITY:-none} capacity=${EFFECTIVE_CPU_CAPACITY:-none} clusters=${EFFECTIVE_CPU_CLUSTERS:-none} net_queues=$EFFECTIVE_NET_QUEUES cellular=$CELLULAR_IFACE table=$CELLULAR_ROUTE_TABLE tether=${TETHER_IFACE_PATTERNS} mode=$EFFECTIVE_TETHER_MODE ipv6_passthrough=$IPV6_PASSTHROUGH"
 }
 
@@ -1235,10 +1229,10 @@ start_vm() {
     resolve_device_config
     preflight_vm >/dev/null
     for file in "$DISK" "$KERNEL"; do
-        [ -r "$file" ] || die "missing $file"
+        [ -r "$file" ] || die "缺少 $file"
     done
     if is_running; then
-        echo "OpenWrt VM is already running (PID $(cat "$PIDFILE"))"
+        echo "ImmortalWrt VM 已在运行 (PID $(cat "$PIDFILE"))"
         exit 0
     fi
     rm -f "$PIDFILE" "$SOCKET"
@@ -1296,7 +1290,7 @@ start_vm() {
     echo "$pid" > "$PIDFILE"
     sleep 2
     if ! is_running; then
-        echo "crosvm exited during startup:" >&2
+        echo "crosvm 启动期间退出:" >&2
         tail -n 80 "$LOG" >&2
         rm -f "$PIDFILE"
         exit 1
@@ -1307,7 +1301,7 @@ start_vm() {
         untakeover >/dev/null
     fi
     start_monitor
-    echo "OpenWrt VM started (PID $pid, WAN $WAN_GUEST_IP, LAN $LAN_GUEST_IP, SSH host port $SSH_DNAT_PORT)"
+    echo "ImmortalWrt VM 已启动 (PID $pid, WAN $WAN_GUEST_IP, LAN $LAN_GUEST_IP, SSH 宿主机端口 $SSH_DNAT_PORT)"
 }
 
 stop_vm() {
@@ -1317,11 +1311,10 @@ stop_vm() {
     stop_monitor
     if ! is_running; then
         rm -f "$PIDFILE" "$SOCKET"
-        # A crashed or previously stopped VM may leave TAP devices, the LAN
-        # bridge and DHCP-suppression rules behind.  Restore Android tethering
-        # even when there is no crosvm process left to stop.
+        # 崩溃或先前停止的 VM 可能留下 TAP 设备、LAN 网桥和 DHCP 抑制规则。
+        # 即使没有 crosvm 进程可停止，也要恢复 Android 热点。
         teardown_network
-        echo "OpenWrt VM is not running"
+        echo "ImmortalWrt VM 未在运行"
         return 0
     fi
     pid="$(cat "$PIDFILE")"
@@ -1335,10 +1328,10 @@ stop_vm() {
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PIDFILE" "$SOCKET"
-    # Tear the bridge down only after crosvm has released its TAP devices.
-    # This also restores Android hotspot/USB DHCP and their original addresses.
+    # 仅在 crosvm 释放其 TAP 设备后拆除网桥。
+    # 这同时恢复 Android 热点/USB DHCP 及其原始地址。
     teardown_network
-    echo "OpenWrt VM stopped"
+    echo "ImmortalWrt VM 已停止"
 }
 
 status_vm() {
@@ -1357,9 +1350,9 @@ status_vm() {
 uninstall_vm() {
     stop_vm
     teardown_network
-    [ "$VM_DIR" = /data/local/openwrt ] || die "unsafe VM_DIR"
+    [ "$VM_DIR" = /data/local/openwrt ] || die "不安全的 VM_DIR"
     rm -rf -- "$VM_DIR"
-    echo "OpenWrt VM data and networking rules removed"
+    echo "ImmortalWrt VM 数据和网络规则已移除"
 }
 
 case "${1:-}" in
@@ -1370,9 +1363,9 @@ case "${1:-}" in
     status) status_vm ;;
     preflight) preflight_vm ;;
     refresh-ipv6) refresh_ipv6 ;;
-    logs) tail -n "${2:-200}" "$LOG" 2>/dev/null; echo "--- guest console ---"; tail -n "${2:-200}" "$CONSOLE" 2>/dev/null ;;
+    logs) tail -n "${2:-200}" "$LOG" 2>/dev/null; echo "--- 客户机控制台 ---"; tail -n "${2:-200}" "$CONSOLE" 2>/dev/null ;;
     takeover) takeover ;;
     untakeover) untakeover ;;
     uninstall) uninstall_vm ;;
-    *) echo "usage: $0 {start|stop|restart|status|preflight|refresh-ipv6|logs [lines]|takeover|untakeover|uninstall}" >&2; exit 2 ;;
+    *) echo "用法: $0 {start|stop|restart|status|preflight|refresh-ipv6|logs [行数]|takeover|untakeover|uninstall}" >&2; exit 2 ;;
 esac
