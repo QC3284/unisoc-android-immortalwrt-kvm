@@ -78,9 +78,9 @@ elif [ "$bridge_mac_changed" = 1 ]; then
 fi
 
 # ADB 负载包含一个紧凑的文件系统。其后备文件在 Android 上被稀疏扩展到 8 GiB；
-# 在线将 ext4 扩展到虚拟磁盘容量。先 e2fsck 修复 truncate 可能引入的不一致，
-# 再 resize2fs 填满 /dev/vda。ImmortalWrt 25.12 中 resize2fs 是独立 APK 包。
-if [ -b /dev/vda ]; then
+# 在线将 ext4 扩展到虚拟磁盘容量。首次启动时 e2fsck + resize2fs 填满 /dev/vda，
+# 完成后写标记文件跳过后续启动的重复操作。ImmortalWrt 25.12 中 resize2fs 是独立 APK 包。
+if [ -b /dev/vda ] && [ ! -f /etc/openwrt-vm-resized ]; then
 	(
 		command -v resize2fs >/dev/null 2>&1 || {
 			apk update 2>/dev/null
@@ -90,7 +90,8 @@ if [ -b /dev/vda ]; then
 			}
 		}
 		e2fsck -fy /dev/vda || true
-		resize2fs /dev/vda || echo "resize-rootfs: resize2fs 失败" >&2
+		resize2fs /dev/vda && touch /etc/openwrt-vm-resized || \
+			echo "resize-rootfs: resize2fs 失败" >&2
 	) >/tmp/resize-rootfs.log 2>&1
 fi
 
