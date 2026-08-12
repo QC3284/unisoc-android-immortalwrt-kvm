@@ -77,15 +77,20 @@ elif [ "$bridge_mac_changed" = 1 ]; then
 	/etc/init.d/odhcpd restart
 fi
 
-# ADB 负载包含一个紧凑的 1 GiB 文件系统。其后备文件在 Android 上被稀疏扩展；
-# 在线将 ext4 扩展到虚拟磁盘容量。
-# ImmortalWrt 25.12 默认使用 apk 包管理器，resize2fs 需要单独安装。
+# ADB 负载包含一个紧凑的文件系统。其后备文件在 Android 上被稀疏扩展到 8 GiB；
+# 在线将 ext4 扩展到虚拟磁盘容量。先 e2fsck 修复 truncate 可能引入的不一致，
+# 再 resize2fs 填满 /dev/vda。ImmortalWrt 25.12 中 resize2fs 是独立 APK 包。
 if [ -b /dev/vda ]; then
 	(
 		command -v resize2fs >/dev/null 2>&1 || {
-			apk update && apk add resize2fs
+			apk update 2>/dev/null
+			apk add resize2fs 2>/dev/null || {
+				echo "resize-rootfs: 无法安装 resize2fs，跳过扩展" >&2
+				exit 0
+			}
 		}
-		resize2fs /dev/vda
+		e2fsck -fy /dev/vda || true
+		resize2fs /dev/vda || echo "resize-rootfs: resize2fs 失败" >&2
 	) >/tmp/resize-rootfs.log 2>&1
 fi
 
