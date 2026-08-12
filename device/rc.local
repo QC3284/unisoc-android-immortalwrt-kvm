@@ -34,7 +34,8 @@ if [ "$current_mode" != "$ipv6_passthrough" ]; then
 		uci -q set network.wan6.proto='dhcpv6'
 		uci -q set network.wan6.reqaddress='try'
 		uci -q set network.wan6.reqprefix='no'
-		# odhcp6c 为公网 WAN /64 安装源特定的默认路由。
+			uci -q set network.wan6.extendprefix='1'
+			# odhcp6c 为公网 WAN /64 安装源特定的默认路由。
 		# LAN ULA 数据包在 NAT66 更改其源地址之前需要一条路由。
 		uci -q set network.owrt_v6_default=route6
 		uci -q set network.owrt_v6_default.interface='wan6'

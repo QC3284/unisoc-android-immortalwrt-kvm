@@ -393,6 +393,13 @@ config interface 'wan'
 	option gateway '$WAN_HOST_IP'
 	list dns '$WAN_DNS1'
 	list dns '$WAN_DNS2'
+
+config interface 'wan6'
+	option device 'eth0'
+	option proto 'dhcpv6'
+	option reqaddress 'try'
+	option reqprefix 'no'
+	option extendprefix '1'
 EOF
     say "正在将网络配置嵌入根文件系统"
     virt-copy-in -a "$BUILD_DIR/openwrt.img" "$BUILD_DIR/network" /etc/config/
