@@ -35,9 +35,9 @@ OPENWRT_PASSWORD="${OPENWRT_PASSWORD:-root}"
 DEVICE_MODEL="${DEVICE_MODEL:-auto}"
 RESOLVED_DEVICE_MODEL=""
 DISK_SIZE="${DISK_SIZE:-8G}"
-# 官方 ext4 镜像约 104 MiB。仅保留少量安全余量用于首次启动的软件包元数据；
+# 官方 ext4 镜像约 300 MiB。仅保留少量安全余量用于首次启动的软件包元数据；
 # Android 在上传后将其稀疏扩展到 DISK_SIZE，ImmortalWrt 在线扩展 ext4。
-TRANSFER_DISK_SIZE="${TRANSFER_DISK_SIZE:-128M}"
+TRANSFER_DISK_SIZE="${TRANSFER_DISK_SIZE:-320M}"
 VM_CPUS="${VM_CPUS:-4}"
 VM_CPU_AFFINITY="${VM_CPU_AFFINITY:-auto}"
 VM_NET_QUEUES="${VM_NET_QUEUES:-auto}"
