@@ -304,6 +304,7 @@ build_tools() {
     aarch64-linux-gnu-gcc -O2 -static -s -Wall -Wextra \
         -o "$BUILD_DIR/tools/kvm-probe" "$SCRIPT_DIR/tools/kvm_probe.c"
     file "$BUILD_DIR/tools/kvm-probe"
+    [[ -x "$BUNDLED_CROSVM" ]] || chmod +x "$BUNDLED_CROSVM" 2>/dev/null || true
     [[ -x "$BUNDLED_CROSVM" ]] || die "缺少内置 crosvm: $BUNDLED_CROSVM"
     file "$BUNDLED_CROSVM" | grep -q 'ARM aarch64.*statically linked' || \
         die "内置 crosvm 不是静态 ARM64 可执行文件"
