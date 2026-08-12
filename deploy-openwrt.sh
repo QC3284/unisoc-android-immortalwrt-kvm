@@ -31,7 +31,7 @@ if [[ -z "${ADB_BIN:-}" ]]; then
 fi
 OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.1}"
 OPENWRT_TARGET="${OPENWRT_TARGET:-armsr/armv8}"
-OPENWRT_PASSWORD="${OPENWRT_PASSWORD:-openwrt}"
+OPENWRT_PASSWORD="${OPENWRT_PASSWORD:-root}"
 DEVICE_MODEL="${DEVICE_MODEL:-auto}"
 RESOLVED_DEVICE_MODEL=""
 DISK_SIZE="${DISK_SIZE:-8G}"
@@ -391,6 +391,7 @@ config interface 'lan'
 	option proto 'static'
 	option ipaddr '$LAN_GUEST_IP'
 	option netmask '255.255.255.0'
+	option ip6assign '64'
 
 config interface 'wan'
 	option device 'eth0'
