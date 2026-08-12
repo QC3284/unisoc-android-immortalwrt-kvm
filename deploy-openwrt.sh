@@ -432,10 +432,20 @@ EOF
         e2fsck -fy "$BUILD_DIR/openwrt.img" || rc=$?
         ((rc <= 1)) || die "e2fsck 失败，返回码=$rc"
     done
-    truncate -s "$TRANSFER_DISK_SIZE" "$BUILD_DIR/openwrt.img"
-    # truncate 扩展文件后必须再次修复文件系统，否则 resize2fs 可能无法读取块位图
-    e2fsck -fy "$BUILD_DIR/openwrt.img" || true
-    resize2fs "$BUILD_DIR/openwrt.img"
+    # ImmortalWrt 出厂 ext4 镜像逻辑大小约 300 MiB（稀疏），解压后约 300 MiB。
+    # 不能缩小，只在不小于目标大小时才执行 truncate。
+    local cur_bytes target_bytes
+    cur_bytes=$(stat -c%s "$BUILD_DIR/openwrt.img")
+    case "$TRANSFER_DISK_SIZE" in
+        *M) target_bytes=$(( ${TRANSFER_DISK_SIZE%M} * 1048576 )) ;;
+        *G) target_bytes=$(( ${TRANSFER_DISK_SIZE%G} * 1073741824 )) ;;
+        *K) target_bytes=$(( ${TRANSFER_DISK_SIZE%K} * 1024 )) ;;
+        *)  target_bytes=$TRANSFER_DISK_SIZE ;;
+    esac
+    if (( cur_bytes < target_bytes )); then
+        truncate -s "$TRANSFER_DISK_SIZE" "$BUILD_DIR/openwrt.img"
+    fi
+    resize2fs -f "$BUILD_DIR/openwrt.img"
 
     cp "$CACHE_DIR/$KERNEL_NAME" "$BUILD_DIR/Image"
     file "$BUILD_DIR/Image"
