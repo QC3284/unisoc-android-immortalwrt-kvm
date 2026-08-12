@@ -1,11 +1,11 @@
-# Publish the physical device model for ubus/LuCI. crosvm's ARM virtual
-# platform does not expose a device-tree model, so OpenWrt otherwise reports
-# an empty model (shown as "?" in LuCI).
+# 为 ubus/LuCI 发布物理设备型号。crosvm 的 ARM 虚拟平台不暴露设备树型号，
+# 因此 ImmortalWrt 否则会报告空型号（在 LuCI 中显示为 "?"）。
+# 由 DeepSeek-V4-Pro 修改：替换为 ImmortalWrt + 国内镜像源
 mkdir -p /tmp/sysinfo
 printf '%s\n' '@DEVICE_MODEL@' > /tmp/sysinfo/model
 
-# Keep the LAN router link-local stable across crosvm restarts. Without a
-# fixed bridge MAC, clients retain obsolete RA default gateways after reboot.
+# 在 crosvm 重启之间保持 LAN 路由器链路本地地址稳定。没有固定的网桥 MAC，
+# 客户端在重启后会保留过时的 RA 默认网关。
 lan_device="$(uci show network | sed -n "s/^\(network\.[^=]*\)\.name='br-lan'$/\1/p" | head -n 1)"
 bridge_mac_changed=0
 if [ -n "$lan_device" ] && \
@@ -15,10 +15,9 @@ if [ -n "$lan_device" ] && \
 	bridge_mac_changed=1
 fi
 
-# The Android manager passes this mode on the kernel command line. In managed
-# mode OpenWrt learns the carrier prefix on WAN, NAT66s its LAN ULA to that
-# public address, and owns LAN RA/DHCPv6. Passthrough mode keeps the historical
-# behavior where Android advertises the carrier /64 directly to clients.
+# Android 管理器通过内核命令行传递此模式。在托管模式下，ImmortalWrt 在 WAN 上
+# 学习运营商前缀，将其 LAN ULA 通过 NAT66 映射到该公网地址，并拥有 LAN RA/DHCPv6。
+# 直通模式保留历史行为，即 Android 将运营商 /64 直接通告给客户端。
 ipv6_passthrough=1
 case " $(cat /proc/cmdline) " in
 	*" owrt_ipv6_passthrough=0 "*) ipv6_passthrough=0 ;;
@@ -35,8 +34,8 @@ if [ "$current_mode" != "$ipv6_passthrough" ]; then
 		uci -q set network.wan6.proto='dhcpv6'
 		uci -q set network.wan6.reqaddress='try'
 		uci -q set network.wan6.reqprefix='no'
-		# odhcp6c installs a source-specific default for the public WAN /64.
-		# LAN ULA packets need a route before NAT66 changes their source.
+		# odhcp6c 为公网 WAN /64 安装源特定的默认路由。
+		# LAN ULA 数据包在 NAT66 更改其源地址之前需要一条路由。
 		uci -q set network.owrt_v6_default=route6
 		uci -q set network.owrt_v6_default.interface='wan6'
 		uci -q set network.owrt_v6_default.target='::/0'
@@ -49,8 +48,8 @@ if [ "$current_mode" != "$ipv6_passthrough" ]; then
 		uci -q set dhcp.lan.ra_preference='high'
 		[ -n "$wan_zone" ] && uci -q set "$wan_zone.masq6=1"
 	else
-		# Let odhcpd invalidate the managed prefix/default route before it is
-		# disabled, so passthrough does not require a client reconnect.
+		# 在禁用 odhcpd 之前让其失效托管前缀/默认路由，
+		# 这样直通模式不需要客户端重新连接。
 		/etc/init.d/odhcpd stop
 		uci -q delete network.lan.ip6assign
 		uci -q delete network.wan6
@@ -69,7 +68,7 @@ if [ "$current_mode" != "$ipv6_passthrough" ]; then
 	/etc/init.d/network reload
 	/etc/init.d/firewall restart
 	/etc/init.d/odhcpd restart
-	# Remove the no-longer-advertised ULA from the router itself as well.
+	# 同时从路由器本身移除不再通告的 ULA。
 	[ "$ipv6_passthrough" = 1 ] && \
 		ip -6 addr del fd00:beef:88::1/64 dev br-lan 2>/dev/null || true
 elif [ "$bridge_mac_changed" = 1 ]; then
@@ -77,9 +76,9 @@ elif [ "$bridge_mac_changed" = 1 ]; then
 	/etc/init.d/odhcpd restart
 fi
 
-# The ADB payload contains a compact 1 GiB filesystem. Its backing file is
-# extended sparsely on Android; grow ext4 online to the virtual disk capacity.
-# OpenWrt 25.12 splits resize2fs from e2fsprogs, so install it on first boot.
+# ADB 负载包含一个紧凑的 1 GiB 文件系统。其后备文件在 Android 上被稀疏扩展；
+# 在线将 ext4 扩展到虚拟磁盘容量。
+# ImmortalWrt 25.12 将 resize2fs 从 e2fsprogs 中分离，因此需要在首次启动时安装。
 if [ -b /dev/vda ]; then
 	(
 		command -v resize2fs >/dev/null 2>&1 || {

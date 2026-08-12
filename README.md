@@ -1,20 +1,22 @@
-# OpenWrt VM for W210DS / Android 13 ARM64
+# ImmortalWrt VM for W210DS / Android 13 ARM64
 
-在已 Root、具备 KVM/TUN 的 ARM64 Android 设备上，通过 `crosvm` 运行 OpenWrt。
+> 由 DeepSeek-V4-Pro 修改：已替换为 ImmortalWrt + 国内 USTC 镜像源，速度更快。
+
+在已 Root、具备 KVM/TUN 的 ARM64 Android 设备上，通过 `crosvm` 运行 ImmortalWrt。
 主分支面向 W210DS，并使用其系统 crosvm；MU300/F50 的安全路由方案位于
 `mu300-routed` 分支。
 本项目完全独立于 Debian VM，不会读写 Debian 的镜像、缓存或设备目录。
 
 ## 当前功能
 
-- OpenWrt 25.12.5、Linux 6.12 ARM64
+- ImmortalWrt 25.12.1、Linux 6.12 ARM64
 - 6 vCPU、1 GiB 内存（均可配置）
 - 8 GiB 稀疏虚拟磁盘；初次只传输 128 MiB，设备端按需占用空间
 - 安装时自动读取 Android 厂商、型号、设备名和 SoC，LuCI 不再显示未知型号
-- Android 本机、SIM/APN 和应用流量保持由 Android 管理，不经 OpenWrt
+- Android 本机、SIM/APN 和应用流量保持由 Android 管理，不经 ImmortalWrt
 - USB 共享和 Wi-Fi 热点作为二层端口动态加入 `owrt-br`
-- 热点客户端直接从 OpenWrt DHCP 获取 `192.168.88.x`，保留真实 MAC
-- Wi-Fi STA 或蜂窝网络自动成为 OpenWrt WAN 上游
+- 热点客户端直接从 ImmortalWrt DHCP 获取 `192.168.88.x`，保留真实 MAC
+- Wi-Fi STA 或蜂窝网络自动成为 ImmortalWrt WAN 上游
 - 自动探测系统 crosvm、蜂窝接口和 Android 当前共享接口；系统没有 crosvm 时
   回退到项目内置的 Android 13 兼容静态 ARM64 版本
 
@@ -46,13 +48,13 @@ VM_NET_QUEUES=auto     # 支持时启用与 vCPU 数量相同的 virtio-net 多�
 # VM_CPU_AFFINITY=none             # 不绑核，交给 Android 调度
 # VM_CPU_AFFINITY='0=4:1=5:2=6:3=0' # 也可以显式指定 guest=host 映射
 
-# 使用 auto 时还会向 OpenWrt 描述大小核 capacity 和 cluster，
+# 使用 auto 时还会向 ImmortalWrt 描述大小核 capacity 和 cluster，
 # 让 Clash 等重负载优先调度到大核。
 
-AUTO_TAKEOVER=0  # Android/SIM/应用直连，只有热点和 USB 客户端走 OpenWrt
-AUTO_TAKEOVER=1  # Android 本机应用流量也由 OpenWrt 接管
+AUTO_TAKEOVER=0  # Android/SIM/应用直连，只有热点和 USB 客户端走 ImmortalWrt
+AUTO_TAKEOVER=1  # Android 本机应用流量也由 ImmortalWrt 接管
 
-IPV6_PASSTHROUGH=0  # OpenWrt 发布 LAN IPv6，并经其防火墙/NAT66 出口
+IPV6_PASSTHROUGH=0  # ImmortalWrt 发布 LAN IPv6，并经其防火墙/NAT66 出口
 IPV6_PASSTHROUGH=1  # Android 将蜂窝公网 IPv6 前缀直通热点/USB
 
 CROSVM_PATH=auto             # auto / bundled / 设备上的绝对路径
@@ -137,7 +139,7 @@ adb shell "su 0 sh -c '/data/local/openwrt/openwrt.sh restart'"
 修改 `device/openwrt.sh` 后，不需要重新构建和上传镜像：
 
 ```bash
-./deploy-openwrt.sh update          # 更新设备脚本并重启 OpenWrt
+./deploy-openwrt.sh update          # 更新设备脚本并重启 ImmortalWrt
 ./deploy-openwrt.sh update-script   # 只更新脚本，暂不重启
 ./deploy-openwrt.sh apply-config    # 同步 AUTO_TAKEOVER 并重启
 ./deploy-openwrt.sh show-config     # 显示当前生效的本地配置
@@ -154,7 +156,7 @@ adb shell "su 0 sh -c '/data/local/openwrt/openwrt.sh restart'"
 
 ```bash
 ./deploy-openwrt.sh prepare         # 仅下载并生成本地镜像
-./deploy-openwrt.sh takeover        # 可选：临时让 Android 应用流量经过 OpenWrt
+./deploy-openwrt.sh takeover        # 可选：临时让 Android 应用流量经过 ImmortalWrt
 ./deploy-openwrt.sh untakeover      # 恢复 Android 本机直连（默认状态）
 ./deploy-openwrt.sh uninstall       # 删除设备端 VM 和项目网络规则
 ./deploy-openwrt.sh purge-local     # 删除本项目的本地 cache/build
@@ -164,9 +166,9 @@ adb shell "su 0 sh -c '/data/local/openwrt/openwrt.sh restart'"
 
 | 用途 | 地址/接口 |
 | --- | --- |
-| OpenWrt LAN / LuCI / SSH | `192.168.88.1` |
+| ImmortalWrt LAN / LuCI / SSH | `192.168.88.1` |
 | Android 软桥管理地址 | `192.168.88.2` (`owrt-br`) |
-| OpenWrt WAN | `192.168.66.2` (`eth0`) |
+| ImmortalWrt WAN | `192.168.66.2` (`eth0`) |
 | Android WAN 端 | `192.168.66.1` (`owrt-wan`) |
 
 普通 Wi-Fi STA 不会加入 LAN 桥；只有 Android 报告接口进入
@@ -178,20 +180,20 @@ adb shell "su 0 sh -c '/data/local/openwrt/openwrt.sh restart'"
 也不会和设备中其他未处于 `TetheredState` 的网桥冲突。若 ADB TCP 正好经过
 这个共享网桥，应用配置或启动 VM 时连接可能短暂中断，推荐保留有线 ADB。
 
-`192.168.88.2` 只用于 Android 宿主与 OpenWrt LAN 的管理/回程，不会成为
-Android 的默认路由。OpenWrt 仅管理桥接的热点和 USB 客户端；蜂窝拨号、
+`192.168.88.2` 只用于 Android 宿主与 ImmortalWrt LAN 的管理/回程，不会成为
+Android 的默认路由。ImmortalWrt 仅管理桥接的热点和 USB 客户端；蜂窝拨号、
 SIM/APN、Android 应用及普通 Wi-Fi STA 始终由 Android 网络栈管理。
 
-IPv4 始终由 OpenWrt DHCP/NAT 和防火墙管理。IPv6 由
+IPv4 始终由 ImmortalWrt DHCP/NAT 和防火墙管理。IPv6 由
 `IPV6_PASSTHROUGH` 决定。设为 `0` 时，设备管理器把蜂窝公网 `/64` 发布到
-OpenWrt WAN；OpenWrt 在 LAN 发布自己管理的 ULA，并通过 OpenWrt NAT66、
-防火墙和可选代理后从公网 WAN 地址出站。客户端 IPv6 此时会经过 OpenWrt。
+ImmortalWrt WAN；ImmortalWrt 在 LAN 发布自己管理的 ULA，并通过 ImmortalWrt NAT66、
+防火墙和可选代理后从公网 WAN 地址出站。客户端 IPv6 此时会经过 ImmortalWrt。
 
 设为 `1` 时，Android 将蜂窝公网前缀直接发布到桥接的热点/USB 端口；客户端
-获得公网地址，但 IPv6 绕过 OpenWrt 防火墙。修改后执行
+获得公网地址，但 IPv6 绕过 ImmortalWrt 防火墙。修改后执行
 `./deploy-openwrt.sh apply-config` 会重启 VM 并切换模式。
 
 直通模式下 Android 原生共享 RA 保持中优先级，项目自带 RA 仅作为低优先级
-兜底；OpenWrt 管理模式则会抑制 Android 在热点/USB 上发出的 RA/DHCPv6，
-避免客户端同时绕过 OpenWrt。蜂窝前缀变化、热点关闭或管理器停止时，辅助
+兜底；ImmortalWrt 管理模式则会抑制 Android 在热点/USB 上发出的 RA/DHCPv6，
+避免客户端同时绕过 ImmortalWrt。蜂窝前缀变化、热点关闭或管理器停止时，辅助
 程序会主动发送撤销 RA，并使用较短生命周期，避免客户端保留失效前缀。
