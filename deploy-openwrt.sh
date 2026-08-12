@@ -425,6 +425,8 @@ EOF
         ((rc <= 1)) || die "e2fsck 失败，返回码=$rc"
     done
     truncate -s "$TRANSFER_DISK_SIZE" "$BUILD_DIR/openwrt.img"
+    # truncate 扩展文件后必须再次修复文件系统，否则 resize2fs 可能无法读取块位图
+    e2fsck -fy "$BUILD_DIR/openwrt.img" || true
     resize2fs "$BUILD_DIR/openwrt.img"
 
     cp "$CACHE_DIR/$KERNEL_NAME" "$BUILD_DIR/Image"
